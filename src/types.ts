@@ -29,3 +29,99 @@ export type LeadTask = {
   dueDate: string
   owner: string
 }
+
+export type StandardLeadField =
+  | 'company_name'
+  | 'contact_name'
+  | 'email'
+  | 'phone'
+  | 'fax'
+  | 'whatsapp'
+  | 'country'
+  | 'region'
+  | 'city'
+  | 'website'
+  | 'address'
+  | 'product_keywords'
+  | 'customer_type'
+  | 'development_level'
+  | 'matched_weida_product_lines'
+  | 'research_summary'
+  | 'risk_notes'
+  | 'suggested_action'
+  | 'source_detail'
+  | 'notes'
+
+export type SheetType = 'lead_list' | 'task_plan' | 'email_template' | 'summary' | 'rules' | 'unknown'
+
+export type SheetTypeDetectionResult = {
+  sheetType: SheetType
+  confidence: number
+  reason: string
+}
+
+export type ColumnMapping = {
+  originalColumn: string
+  columnIndex: number
+  standardField: StandardLeadField | ''
+  confidence: number
+  reason: string
+  isDuplicate?: boolean
+  duplicateOfColumn?: string
+  isPrimary?: boolean
+}
+
+export type HeaderDetectionResult = {
+  rowIndex: number
+  confidence: number
+  score: number
+  reason: string
+}
+
+export type NormalizedLeadRow = {
+  rowNumber: number
+  values: Partial<Record<StandardLeadField, string>>
+  rawRow: Record<string, string>
+  status: 'valid' | 'skipped' | 'duplicate'
+  issues: string[]
+}
+
+export type ImportSheetStats = {
+  totalRows: number
+  rawDataRows: number
+  validRows: number
+  skippedRows: number
+  duplicateRows: number
+  averageConfidence: number
+  needsReviewFields: number
+  mappedFieldCount: number
+}
+
+export type ImportSheetPreview = {
+  sheetName: string
+  sheetType: SheetType
+  sheetTypeConfidence: number
+  sheetTypeReason: string
+  suggestedAction: string
+  totalRows: number
+  headerRowIndex: number
+  headerRowNumber: number
+  headerConfidence: number
+  headerReason: string
+  headers: string[]
+  mappings: ColumnMapping[]
+  rows: NormalizedLeadRow[]
+  previewRows: NormalizedLeadRow[]
+  stats: ImportSheetStats
+  suggested: boolean
+  warnings: string[]
+}
+
+export type ImportPreviewResult = {
+  fileName: string
+  fileSize: number
+  fileType: string
+  sheets: ImportSheetPreview[]
+  selectedSheetIndex: number
+  error?: string
+}

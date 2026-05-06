@@ -12,17 +12,25 @@ import {
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { NavLink, Route, Routes, useParams } from 'react-router-dom'
-import type { ReactNode } from 'react'
+import { useRef, useState } from 'react'
+import type { ChangeEvent, DragEvent, ReactNode } from 'react'
 import './App.css'
 import {
   emailTemplates,
   fieldMappings,
   importBatches,
-  importRows,
   leads,
   tasks,
 } from './data'
-import type { Lead, LeadStatus, TaskStatus } from './types'
+import type { ImportPreviewResult, Lead, LeadStatus, SheetType, StandardLeadField, TaskStatus } from './types'
+import {
+  applyColumnMappingsToSheet,
+  displayWebsite,
+  formatFileSize,
+  parseLeadFile,
+  standardLeadFieldLabels,
+  standardLeadFields,
+} from './utils/leadImport'
 
 const navItems = [
   { to: '/', label: '工作台', icon: LayoutDashboard },
@@ -47,6 +55,17 @@ const taskStatusLabel: Record<TaskStatus, string> = {
   in_progress: '进行中',
   completed: '已完成',
   skipped: '已跳过',
+}
+
+const importSourceTypes = ['广交会', 'Alibaba 国际站', '中国制造网', 'Google', 'LinkedIn', '海关数据', '行业黄页', '手动 Excel', '其他']
+
+const sheetTypeLabel: Record<SheetType, string> = {
+  lead_list: '客户明细',
+  task_plan: '跟进任务',
+  email_template: '邮件模板',
+  summary: '总览摘要',
+  rules: '规则说明',
+  unknown: '未知',
 }
 
 function App() {
@@ -207,67 +226,443 @@ function MetricCard({
 }
 
 function LeadImportPage() {
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const [sourceType, setSourceType] = useState('手动 Excel')
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null)
+  const [preview, setPreview] = useState<ImportPreviewResult | null>(null)
+  const [selectedSheetIndex, setSelectedSheetIndex] = useState(0)
+  const [isParsing, setIsParsing] = useState(false)
+  const [message, setMessage] = useState('')
+
+  const selectedSheet = preview?.sheets[selectedSheetIndex]
+
+  async function handleFile(file: File | undefined) {
+    if (!file) {
+      return
+    }
+
+    setUploadedFile(file)
+    setIsParsing(true)
+    setMessage('')
+    const result = await parseLeadFile(file)
+    setPreview(result)
+    setSelectedSheetIndex(result.selectedSheetIndex)
+    setIsParsing(false)
+    if (result.error) {
+      setMessage(result.error)
+    } else if (!result.sheets.some((sheet) => sheet.sheetType === 'lead_list')) {
+      setMessage('未识别到客户明细表，请手动选择 sheet。')
+    } else {
+      setMessage('文件已读取，系统已默认选择第一个客户明细表进行预览。')
+    }
+  }
+
+  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+    void handleFile(event.target.files?.[0])
+  }
+
+  function handleDrop(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault()
+    void handleFile(event.dataTransfer.files?.[0])
+  }
+
+  function handleMappingChange(columnIndex: number, standardField: StandardLeadField | '') {
+    if (!preview || !selectedSheet) {
+      return
+    }
+
+    const nextMappings = selectedSheet.mappings.map((mapping) =>
+      mapping.columnIndex === columnIndex
+        ? {
+            ...mapping,
+            standardField,
+            confidence: standardField ? Math.max(mapping.confidence, 0.72) : 0,
+            reason: standardField ? '人工调整字段映射。' : '人工取消字段映射。',
+          }
+        : mapping,
+    )
+    const nextSheet = applyColumnMappingsToSheet(selectedSheet, nextMappings)
+    const nextSheets = preview.sheets.map((sheet, index) => (index === selectedSheetIndex ? nextSheet : sheet))
+    setPreview({ ...preview, sheets: nextSheets })
+  }
+
+  async function handleReidentify() {
+    if (!uploadedFile) {
+      setMessage('请先上传 Excel 或 CSV 文件。')
+      return
+    }
+    await handleFile(uploadedFile)
+  }
+
   return (
     <section>
       <PageHeader
         title="站外客户导入"
-        description="预留 Excel / CSV 上传、字段识别、数据校验和入库确认流程。"
+        description="上传 Excel / CSV 客户表，先完成字段识别、映射预览和数据预览。本阶段不写入数据库。"
         action={<button className="primary-button">创建导入任务</button>}
       />
 
-      <section className="upload-panel">
-        <div className="upload-icon">
-          <Upload size={28} aria-hidden="true" />
-        </div>
-        <h2>上传客户表</h2>
-        <p>第一阶段不解析文件，仅预留上传区域和导入批次结构。</p>
-        <div className="upload-actions">
-          <button className="primary-button">选择文件</button>
-          <button className="ghost-button">下载字段模板</button>
-        </div>
-      </section>
-
-      <div className="two-column">
+      <div className="import-grid">
         <section className="panel">
           <div className="section-title">
-            <h2>导入批次</h2>
-            <span>{importBatches.length} 个批次</span>
+            <h2>文件上传</h2>
+            <span>支持 .xlsx / .xls / .csv</span>
           </div>
-          <DataTable
-            columns={['文件名', '状态', '总行数', '有效客户', '重复', '创建时间']}
-            rows={importBatches.map((batch) => [
-              batch.fileName,
-              batch.status === 'completed' ? '已完成' : '待处理',
-              batch.totalRows,
-              batch.importedRows,
-              batch.duplicateRows,
-              batch.createdAt,
-            ])}
-          />
+          <label
+            className="upload-panel upload-dropzone"
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={handleDrop}
+          >
+            <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFileChange} />
+            <div className="upload-icon">
+              <Upload size={28} aria-hidden="true" />
+            </div>
+            <h2>{isParsing ? '正在解析文件...' : '拖拽或选择客户表'}</h2>
+            <p>系统会读取所有 sheet，自动识别表头、字段映射和前 20 行数据预览。</p>
+            <button type="button" className="primary-button" onClick={() => fileInputRef.current?.click()}>
+              选择文件
+            </button>
+          </label>
+
+          {uploadedFile ? (
+            <div className="file-meta">
+              <div>
+                <strong>{uploadedFile.name}</strong>
+                <span>
+                  {formatFileSize(uploadedFile.size)} · {uploadedFile.type || '未知类型'}
+                </span>
+              </div>
+              <StatusPill tone={preview?.error ? 'orange' : 'blue'}>{preview?.error ? '解析失败' : '已上传'}</StatusPill>
+            </div>
+          ) : null}
+
+          <label className="field-label">
+            来源类型
+            <select value={sourceType} onChange={(event) => setSourceType(event.target.value)} aria-label="来源类型">
+              {importSourceTypes.map((source) => (
+                <option key={source}>{source}</option>
+              ))}
+            </select>
+          </label>
         </section>
 
         <section className="panel">
           <div className="section-title">
-            <h2>待校验行</h2>
-            <span>结构化预览</span>
+            <h2>导入统计</h2>
+            <span>{sourceType}</span>
           </div>
-          <div className="stack">
-            {importRows.map((row) => (
-              <div className="review-row" key={row.id}>
-                <div>
-                  <strong>第 {row.rowNumber} 行 · {row.companyName}</strong>
-                  <span>{row.message}</span>
-                </div>
-                <StatusPill tone={row.status === 'valid' ? 'green' : 'orange'}>
-                  {row.status === 'valid' ? '可入库' : '需确认'}
-                </StatusPill>
-              </div>
-            ))}
+          <div className="import-stat-grid">
+            <ImportStat label="原始总行数" value={selectedSheet?.stats.totalRows ?? 0} />
+            <ImportStat label="有效行数" value={selectedSheet?.stats.validRows ?? 0} />
+            <ImportStat label="跳过行数" value={selectedSheet?.stats.skippedRows ?? 0} />
+            <ImportStat label="疑似重复行" value={selectedSheet?.stats.duplicateRows ?? 0} />
+            <ImportStat label="平均置信度" value={`${Math.round((selectedSheet?.stats.averageConfidence ?? 0) * 100)}%`} />
+            <ImportStat label="需人工确认字段" value={selectedSheet?.stats.needsReviewFields ?? 0} />
+          </div>
+          {message ? <p className={preview?.error ? 'error-text' : 'hint-text'}>{message}</p> : null}
+          <div className="upload-actions">
+            <button type="button" className="ghost-button" onClick={() => fileInputRef.current?.click()}>
+              重新上传
+            </button>
+            <button type="button" className="ghost-button" onClick={() => void handleReidentify()}>
+              重新识别
+            </button>
+            <button type="button" className="primary-button" onClick={() => setMessage('字段映射已确认，本阶段仅保存在页面状态。')}>
+              确认映射
+            </button>
+            <button type="button" className="primary-button" onClick={() => setMessage('下一阶段将写入客户池。')}>
+              下一步：准备入库
+            </button>
           </div>
         </section>
       </div>
+
+      {preview?.sheets.length ? <ImportRecommendationCard preview={preview} /> : null}
+
+      {preview?.sheets.length ? (
+        <section className="panel">
+          <div className="section-title">
+            <h2>Sheet 识别结果</h2>
+            <span>{preview.sheets.length} 个 sheet</span>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Sheet 名称</th>
+                  <th>Sheet 类型</th>
+                  <th>总行数</th>
+                  <th>表头行</th>
+                  <th>字段识别数量</th>
+                  <th>平均置信度</th>
+                  <th>建议导入</th>
+                </tr>
+              </thead>
+              <tbody>
+                {preview.sheets.map((sheet, index) => (
+                  <tr key={sheet.sheetName} className={index === selectedSheetIndex ? 'selected-row' : undefined}>
+                    <td>
+                      <button type="button" className="table-button" onClick={() => setSelectedSheetIndex(index)}>
+                        {sheet.sheetName}
+                      </button>
+                      {sheet.warnings.map((warning) => (
+                        <span className="warning-line" key={warning}>
+                          {warning}
+                        </span>
+                      ))}
+                    </td>
+                    <td>
+                      <StatusPill tone={getSheetTypeTone(sheet.sheetType)}>{sheetTypeLabel[sheet.sheetType]}</StatusPill>
+                      <span className="subtle-line">
+                        {Math.round(sheet.sheetTypeConfidence * 100)}% · {sheet.sheetTypeReason}
+                      </span>
+                    </td>
+                    <td>{sheet.totalRows}</td>
+                    <td>
+                      第 {sheet.headerRowNumber} 行
+                      <span className="subtle-line">{sheet.headerReason}</span>
+                    </td>
+                    <td>{sheet.stats.mappedFieldCount}</td>
+                    <td>{Math.round(sheet.stats.averageConfidence * 100)}%</td>
+                    <td>
+                      <StatusPill tone={getSuggestedActionTone(sheet.sheetType)}>{sheet.suggestedAction}</StatusPill>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+
+      {selectedSheet ? (
+        <section className="panel">
+          <div className="section-title">
+            <h2>字段映射预览：{selectedSheet.sheetName}</h2>
+            <span>
+              {sheetTypeLabel[selectedSheet.sheetType]} · 置信度低于 70% 显示为需确认
+            </span>
+          </div>
+          {selectedSheet.sheetType !== 'lead_list' ? (
+            <p className="warning-box">当前 sheet 不是客户明细表，字段映射仅供检查，不会作为客户池导入建议。</p>
+          ) : null}
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>原始列名</th>
+                  <th>系统标准字段</th>
+                  <th>置信度</th>
+                  <th>识别原因</th>
+                  <th>状态</th>
+                  <th>人工调整</th>
+                </tr>
+              </thead>
+              <tbody>
+                {selectedSheet.mappings.map((mapping) => (
+                  <tr key={`${mapping.columnIndex}-${mapping.originalColumn}`}>
+                    <td>{mapping.originalColumn}</td>
+                    <td>{getMappingDisplayName(mapping.originalColumn, mapping.standardField)}</td>
+                    <td>{Math.round(mapping.confidence * 100)}%</td>
+                    <td>{mapping.reason}</td>
+                    <td>
+                      <StatusPill tone={mapping.isDuplicate || !mapping.standardField || mapping.confidence < 0.7 ? 'orange' : 'green'}>
+                        {mapping.isDuplicate ? '重复字段' : !mapping.standardField || mapping.confidence < 0.7 ? '需确认' : '已识别'}
+                      </StatusPill>
+                      {mapping.isDuplicate ? <span className="warning-line">重复字段，可作为补充信息</span> : null}
+                    </td>
+                    <td>
+                      <select
+                        aria-label={`${mapping.originalColumn} 字段映射`}
+                        value={mapping.standardField}
+                        onChange={(event) =>
+                          handleMappingChange(mapping.columnIndex, event.target.value as StandardLeadField | '')
+                        }
+                      >
+                        <option value="">不映射</option>
+                        {standardLeadFields.map((field) => (
+                          <option key={field} value={field}>
+                            {standardLeadFieldLabels[field]}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+
+      {selectedSheet ? (
+        <section className="panel">
+          <div className="section-title">
+            <h2>数据预览：{selectedSheet.sheetName}</h2>
+            <span>只显示当前选中 sheet 的前 20 行标准化客户数据</span>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>行号</th>
+                  <th>公司名称</th>
+                  <th>国家</th>
+                  <th>联系人</th>
+                  <th>邮箱</th>
+                  <th>电话</th>
+                  <th>网站</th>
+                  <th>客户类型</th>
+                  <th>开发层级</th>
+                  <th>推荐产品线</th>
+                  <th>背调结论</th>
+                  <th>风险点</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                {selectedSheet.previewRows.length > 0 ? (
+                  selectedSheet.previewRows.map((row) => (
+                    <tr key={row.rowNumber}>
+                      <td>{row.rowNumber}</td>
+                      <td>{row.values.company_name || '-'}</td>
+                      <td>{row.values.country || '-'}</td>
+                      <td>{row.values.contact_name || '-'}</td>
+                      <td>{row.values.email || '-'}</td>
+                      <td>{row.values.phone || row.values.whatsapp || '-'}</td>
+                      <td>{displayWebsite(row.values.website) || '-'}</td>
+                      <td>{row.values.customer_type || '-'}</td>
+                      <td>{row.values.development_level || '-'}</td>
+                      <td>{row.values.matched_weida_product_lines || row.values.product_keywords || '-'}</td>
+                      <td>{row.values.research_summary || '-'}</td>
+                      <td>{row.values.risk_notes || '-'}</td>
+                      <td>
+                        <StatusPill tone={row.status === 'valid' ? 'green' : row.status === 'duplicate' ? 'orange' : 'blue'}>
+                          {row.status === 'valid' ? '有效' : row.status === 'duplicate' ? '疑似重复' : '跳过'}
+                        </StatusPill>
+                        {row.issues.map((issue) => (
+                          <span className="warning-line" key={issue}>
+                            {issue}
+                          </span>
+                        ))}
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={13}>暂无可预览数据</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : (
+        <div className="two-column">
+          <section className="panel">
+            <div className="section-title">
+              <h2>导入批次</h2>
+              <span>{importBatches.length} 个批次</span>
+            </div>
+            <DataTable
+              columns={['文件名', '状态', '总行数', '有效客户', '重复', '创建时间']}
+              rows={importBatches.map((batch) => [
+                batch.fileName,
+                batch.status === 'completed' ? '已完成' : '待处理',
+                batch.totalRows,
+                batch.importedRows,
+                batch.duplicateRows,
+                batch.createdAt,
+              ])}
+            />
+          </section>
+
+          <section className="panel">
+            <h2>导入说明</h2>
+            <div className="rule-list">
+              <div>
+                <strong>本阶段只预览</strong>
+                <span>上传文件后仅在页面状态中解析，不会写入 Supabase。</span>
+              </div>
+              <div>
+                <strong>支持多个 sheet</strong>
+                <span>系统会读取 Excel 中所有 sheet，并判断哪个更适合导入。</span>
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
     </section>
   )
+}
+
+function ImportRecommendationCard({ preview }: { preview: ImportPreviewResult }) {
+  const grouped = preview.sheets.reduce<Record<SheetType, number>>(
+    (acc, sheet) => {
+      acc[sheet.sheetType] += 1
+      return acc
+    },
+    {
+      lead_list: 0,
+      task_plan: 0,
+      email_template: 0,
+      summary: 0,
+      rules: 0,
+      unknown: 0,
+    },
+  )
+
+  return (
+    <section className="recommend-card">
+      <div>
+        <h2>推荐导入对象</h2>
+        <p>系统已先区分客户明细、模板、任务、总览和规则说明，避免把加工计划表误导入客户池。</p>
+      </div>
+      <div className="recommend-list">
+        <span>客户明细表：{grouped.lead_list} 个，建议导入客户池</span>
+        <span>邮件模板表：{grouped.email_template} 个，建议导入邮件模板</span>
+        <span>跟进任务表：{grouped.task_plan} 个，建议导入任务计划</span>
+        <span>总览/规则说明：{grouped.summary + grouped.rules} 个，仅供阅读，不导入</span>
+        {grouped.unknown > 0 ? <span>未知：{grouped.unknown} 个，需要人工确认</span> : null}
+      </div>
+    </section>
+  )
+}
+
+function ImportStat({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className="import-stat">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  )
+}
+
+function getSheetTypeTone(sheetType: SheetType): 'blue' | 'green' | 'orange' {
+  if (sheetType === 'lead_list') {
+    return 'green'
+  }
+  if (sheetType === 'unknown') {
+    return 'orange'
+  }
+  return 'blue'
+}
+
+function getSuggestedActionTone(sheetType: SheetType): 'blue' | 'green' | 'orange' {
+  if (sheetType === 'lead_list' || sheetType === 'email_template' || sheetType === 'task_plan') {
+    return 'green'
+  }
+  if (sheetType === 'unknown') {
+    return 'orange'
+  }
+  return 'blue'
+}
+
+function getMappingDisplayName(originalColumn: string, standardField: StandardLeadField | '') {
+  if (standardField) {
+    return standardLeadFieldLabels[standardField]
+  }
+  return /^(序号|编号|no\.?|id)$/i.test(originalColumn.trim()) ? '忽略字段' : '未映射'
 }
 
 function LeadPoolPage() {
