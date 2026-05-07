@@ -5,6 +5,7 @@ import {
   Database,
   FileSpreadsheet,
   LayoutDashboard,
+  LogOut,
   Mail,
   Search,
   Settings,
@@ -14,12 +15,13 @@ import {
   X,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+import type { Session } from '@supabase/supabase-js'
 import { NavLink, Route, Routes, useParams } from 'react-router-dom'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { ChangeEvent, DragEvent, ReactNode } from 'react'
+import type { ChangeEvent, DragEvent, FormEvent, ReactNode } from 'react'
 import './App.css'
 import { fieldMappings, importBatches, leads, tasks } from './data'
-import { isSupabaseConfigured } from './lib/supabase'
+import { isSupabaseConfigured, supabase } from './lib/supabase'
 import {
   cleanupOldDefaultTemplates,
   createEmailTemplate,
@@ -121,6 +123,63 @@ const sheetTypeLabel: Record<SheetType, string> = {
 }
 
 function App() {
+  const [session, setSession] = useState<Session | null>(null)
+  const [isCheckingAuth, setIsCheckingAuth] = useState(isSupabaseConfigured)
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase) {
+      return
+    }
+
+    let mounted = true
+    supabase.auth.getSession().then(({ data }) => {
+      if (!mounted) return
+      setSession(data.session)
+      setIsCheckingAuth(false)
+    })
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, currentSession) => {
+      setSession(currentSession)
+      setIsCheckingAuth(false)
+    })
+
+    return () => {
+      mounted = false
+      authListener.subscription.unsubscribe()
+    }
+  }, [])
+
+  async function handleSignOut() {
+    if (!supabase) return
+    await supabase.auth.signOut()
+    setSession(null)
+  }
+
+  if (!isSupabaseConfigured) {
+    return <AuthSetupScreen />
+  }
+
+  if (isCheckingAuth) {
+    return (
+      <div className="auth-shell">
+        <div className="auth-card">
+          <div className="brand auth-brand">
+            <div className="brand-mark">w</div>
+            <div>
+              <strong>wieldmaster</strong>
+              <span>业务开发系统</span>
+            </div>
+          </div>
+          <p className="hint-text">正在检查登录状态...</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!session) {
+    return <AuthPage />
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -150,8 +209,12 @@ function App() {
         </nav>
 
         <div className="side-note">
-          <span>第一阶段</span>
-          <p>仅搭建系统基础框架，导入、去重、字段识别和邮件发送先保留接口位置。</p>
+          <span>当前账号</span>
+          <p>{session.user.email}</p>
+          <button className="ghost-button sign-out-button" onClick={() => void handleSignOut()}>
+            <LogOut size={15} aria-hidden="true" />
+            退出登录
+          </button>
         </div>
       </aside>
 
@@ -168,6 +231,157 @@ function App() {
       </main>
     </div>
   )
+}
+
+function AuthSetupScreen() {
+  return (
+    <div className="auth-shell">
+      <section className="auth-card">
+        <div className="brand auth-brand">
+          <div className="brand-mark">w</div>
+          <div>
+            <strong>wieldmaster</strong>
+            <span>业务开发系统</span>
+          </div>
+        </div>
+        <h1>请先配置 Supabase 环境变量</h1>
+        <p>网络版需要 Supabase Auth 和数据库连接。请在本地或部署平台配置以下环境变量后重新打开系统。</p>
+        <div className="env-list">
+          <code>VITE_SUPABASE_URL</code>
+          <code>VITE_SUPABASE_ANON_KEY</code>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function AuthPage() {
+  const [mode, setMode] = useState<'login' | 'register'>('login')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [fullName, setFullName] = useState('')
+  const [message, setMessage] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!supabase) {
+      setMessage('请先配置 Supabase 环境变量。')
+      return
+    }
+    if (!email.trim() || !password.trim()) {
+      setMessage('请输入邮箱和密码。')
+      return
+    }
+
+    setIsSubmitting(true)
+    setMessage('')
+    const result = mode === 'login'
+      ? await supabase.auth.signInWithPassword({ email: email.trim(), password })
+      : await supabase.auth.signUp({
+        email: email.trim(),
+        password,
+        options: {
+          data: {
+            full_name: fullName.trim(),
+          },
+        },
+      })
+    setIsSubmitting(false)
+
+    if (result.error) {
+      setMessage(formatAuthError(result.error.message))
+      return
+    }
+
+    if (mode === 'register' && !result.data.session) {
+      setMessage('注册已提交，请按邮箱确认邮件完成账号激活。')
+      return
+    }
+
+    setMessage(mode === 'login' ? '登录成功，正在进入系统。' : '注册成功，正在进入系统。')
+  }
+
+  return (
+    <div className="auth-shell">
+      <section className="auth-card">
+        <div className="brand auth-brand">
+          <div className="brand-mark">w</div>
+          <div>
+            <strong>wieldmaster</strong>
+            <span>业务开发系统</span>
+          </div>
+        </div>
+        <h1>{mode === 'login' ? '账号登录' : '注册账号'}</h1>
+        <p>业务员登录后可共同使用客户导入、客户池、跟进任务和邮件模板库。</p>
+
+        <form className="auth-form" onSubmit={(event) => void handleSubmit(event)}>
+          {mode === 'register' ? (
+            <label>
+              <span>姓名</span>
+              <input
+                autoComplete="name"
+                value={fullName}
+                onChange={(event) => setFullName(event.target.value)}
+                placeholder="请输入姓名"
+              />
+            </label>
+          ) : null}
+          <label>
+            <span>邮箱</span>
+            <input
+              type="email"
+              autoComplete="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder="name@company.com"
+            />
+          </label>
+          <label>
+            <span>密码</span>
+            <input
+              type="password"
+              autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="至少 6 位密码"
+            />
+          </label>
+          {message ? <p className="warning-box">{message}</p> : null}
+          <button className="primary-button" disabled={isSubmitting} type="submit">
+            {isSubmitting ? '处理中...' : mode === 'login' ? '登录' : '注册'}
+          </button>
+        </form>
+
+        <button
+          className="link-button"
+          type="button"
+          onClick={() => {
+            setMode((current) => (current === 'login' ? 'register' : 'login'))
+            setMessage('')
+          }}
+        >
+          {mode === 'login' ? '没有账号？注册业务员账号' : '已有账号？返回登录'}
+        </button>
+      </section>
+    </div>
+  )
+}
+
+function formatAuthError(message: string): string {
+  if (/invalid login credentials/i.test(message)) {
+    return '邮箱或密码不正确。'
+  }
+  if (/email not confirmed/i.test(message)) {
+    return '邮箱尚未确认，请先打开确认邮件。'
+  }
+  if (/password/i.test(message)) {
+    return '密码不符合要求，请至少使用 6 位字符。'
+  }
+  if (/already registered|user already registered/i.test(message)) {
+    return '该邮箱已注册，请直接登录。'
+  }
+  return message
 }
 
 function PageHeader({
