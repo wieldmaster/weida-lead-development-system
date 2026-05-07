@@ -1,36 +1,57 @@
 import {
   BarChart3,
   ClipboardList,
+  Copy,
   Database,
   FileSpreadsheet,
   LayoutDashboard,
   Mail,
   Search,
   Settings,
+  Trash2,
   Upload,
   UsersRound,
+  X,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { NavLink, Route, Routes, useParams } from 'react-router-dom'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, DragEvent, ReactNode } from 'react'
 import './App.css'
-import {
-  emailTemplates,
-  fieldMappings,
-  importBatches,
-  leads,
-  tasks,
-} from './data'
+import { fieldMappings, importBatches, leads, tasks } from './data'
 import { isSupabaseConfigured } from './lib/supabase'
+import {
+  cleanupOldDefaultTemplates,
+  createEmailTemplate,
+  deleteEmailTemplate,
+  fetchEmailTemplates,
+  renderTemplateWithLead,
+  seedDefaultTemplates,
+  templateVariables,
+  updateEmailTemplate,
+} from './services/emailTemplateService'
 import { importLeadListSheet } from './services/leadImportService'
 import { fetchLeadPoolRecords } from './services/leadPoolService'
+import {
+  createTask,
+  fetchLeadsForTaskSelect,
+  fetchTasks,
+  markTaskInvalid,
+  updateTask,
+} from './services/leadTaskService'
 import type {
+  EmailTemplateInput,
+  EmailTemplateRecord,
   ImportPreviewResult,
   ImportProgress,
   Lead,
   LeadImportResult,
   LeadPoolRecord,
+  LeadSelectOption,
+  LeadTaskInput,
+  LeadTaskPriority,
+  LeadTaskRecord,
+  LeadTaskStatus,
   LeadStatus,
   SheetType,
   StandardLeadField,
@@ -69,6 +90,24 @@ const taskStatusLabel: Record<TaskStatus, string> = {
   completed: '已完成',
   skipped: '已跳过',
 }
+
+const leadTaskStatusLabels: Record<LeadTaskStatus, string> = {
+  pending: '待处理',
+  in_progress: '进行中',
+  completed: '已完成',
+  paused: '暂缓',
+  invalid: '无效',
+}
+
+const leadTaskPriorityLabels: Record<LeadTaskPriority, string> = {
+  low: '低',
+  medium: '中',
+  high: '高',
+  urgent: '紧急',
+}
+
+const taskBoardStatuses: LeadTaskStatus[] = ['pending', 'in_progress', 'completed', 'paused', 'invalid']
+const taskTypeOptions = ['首轮开发', 'D3跟进', 'D7跟进', 'D14跟进', '样品跟进', '报价跟进', '资料补充', '其他']
 
 const importSourceTypes = ['广交会', 'Alibaba 国际站', '中国制造网', 'Google', 'LinkedIn', '海关数据', '行业黄页', '手动 Excel', '其他']
 
@@ -1051,7 +1090,7 @@ function LeadDetailPage() {
       <PageHeader
         title={lead.companyName}
         description={`${lead.country} · ${lead.industry} · ${statusLabel[lead.status]}`}
-        action={<button className="primary-button">创建跟进任务</button>}
+        action={<NavLink className="primary-button" to="/tasks">创建跟进任务</NavLink>}
       />
 
       <div className="detail-grid">
@@ -1110,66 +1149,668 @@ function InfoList({ lead }: { lead: Lead }) {
   )
 }
 
+function createEmptyTaskInput(leadId: string | null = null): LeadTaskInput {
+  return {
+    lead_id: leadId,
+    task_type: '首轮开发',
+    task_title: '',
+    task_description: '',
+    due_date: '',
+    status: 'pending',
+    priority: 'medium',
+    owner_name: 'Elan',
+  }
+}
+
+function createEmptyTemplateInput(): EmailTemplateInput {
+  return {
+    template_name: '',
+    customer_type: '',
+    development_stage: '首轮开发',
+    subject: '',
+    body: '',
+    language: 'en',
+    is_active: true,
+  }
+}
+
+function taskToInput(task: LeadTaskRecord): LeadTaskInput {
+  return {
+    lead_id: task.lead_id,
+    task_type: task.task_type,
+    task_title: task.task_title,
+    task_description: task.task_description ?? '',
+    due_date: task.due_date ?? '',
+    status: task.status,
+    priority: task.priority,
+    owner_name: task.owner_name ?? '',
+  }
+}
+
+function templateToInput(template: EmailTemplateRecord): EmailTemplateInput {
+  return {
+    template_name: template.template_name,
+    customer_type: template.customer_type,
+    development_stage: template.development_stage,
+    subject: template.subject,
+    body: template.body,
+    language: template.language,
+    is_active: template.is_active,
+  }
+}
+
+function upsertById<T extends { id: string }>(items: T[], item: T): T[] {
+  return items.some((current) => current.id === item.id)
+    ? items.map((current) => (current.id === item.id ? item : current))
+    : [item, ...items]
+}
+
+const emailTemplateCustomerTypeLabels: Record<string, string> = {
+  hardware_importer_wholesaler: '五金进口商 / 批发商',
+  industrial_mro_engineering_supplier: '工业品 / MRO / 工程渠道',
+  building_material_construction_hardware_channel: '建材 / 工程 / 装饰五金渠道',
+  automotive_repair_garage_tool_channel: '汽修 / 车库 / 维修工具渠道',
+  electrical_insulated_tool_distributor: '电工 / 电气 / 绝缘工具渠道',
+  retail_chain_hardware_store: '零售连锁 / 五金门店渠道',
+  plumbing_sanitary_hardware_channel: '管道 / 卫浴五金渠道',
+  general_trading_company: '综合贸易公司',
+  unknown_business_type: '业务类型不明确客户',
+  follow_up_templates: '跟进模板',
+  new_lead: '旧默认模板',
+  quote_follow_up: '旧默认模板',
+}
+
+const emailTemplateStageLabels: Record<string, string> = {
+  first_outreach: '首轮开发',
+  d3_follow_up: '3天后跟进',
+  d7_follow_up: '7天后跟进',
+  catalog_offer: '目录/选品推荐',
+  quote_follow_up: '报价/产品资料跟进',
+  no_reply_final: '长期未回复轻提醒',
+  whatsapp_short_message: 'WhatsApp 短消息',
+  new_lead: '旧首轮开发',
+}
+
+const legacyDefaultTemplateNames = new Set(['new_lead', 'quote_follow_up'])
+
+function isLegacyDefaultTemplate(template: EmailTemplateRecord): boolean {
+  return legacyDefaultTemplateNames.has(template.template_name)
+    || legacyDefaultTemplateNames.has(template.customer_type)
+    || legacyDefaultTemplateNames.has(template.development_stage)
+}
+
+function getEmailTemplateCustomerTypeLabel(value: string): string {
+  return emailTemplateCustomerTypeLabels[value] ?? (value || '未分类')
+}
+
+function getEmailTemplateStageLabel(value: string): string {
+  return emailTemplateStageLabels[value] ?? (value || '未设置阶段')
+}
+
 function TasksPage() {
+  const [taskRecords, setTaskRecords] = useState<LeadTaskRecord[]>([])
+  const [leadOptions, setLeadOptions] = useState<LeadSelectOption[]>([])
+  const [message, setMessage] = useState('')
+  const [isLoading, setIsLoading] = useState(true)
+  const [isSaving, setIsSaving] = useState(false)
+  const [selectedTask, setSelectedTask] = useState<LeadTaskRecord | null>(null)
+  const [draftTask, setDraftTask] = useState<LeadTaskInput>(createEmptyTaskInput())
+  const [leadSearch, setLeadSearch] = useState('')
+  const [isTaskModalOpen, setIsTaskModalOpen] = useState(false)
+
+  useEffect(() => {
+    let mounted = true
+    async function loadTasks() {
+      setIsLoading(true)
+      const [tasksResult, leadsResult] = await Promise.all([fetchTasks(), fetchLeadsForTaskSelect()])
+      if (!mounted) return
+      setTaskRecords(tasksResult.tasks)
+      setLeadOptions(leadsResult.leads)
+      setMessage(tasksResult.error ?? leadsResult.error ?? '')
+      setIsLoading(false)
+    }
+    void loadTasks()
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+  const filteredLeadOptions = leadOptions.filter((lead) =>
+    lead.company_name.toLowerCase().includes(leadSearch.trim().toLowerCase()),
+  )
+  function openNewTask() {
+    setSelectedTask(null)
+    setDraftTask(createEmptyTaskInput())
+    setLeadSearch('')
+    setIsTaskModalOpen(true)
+    setMessage('')
+  }
+
+  function openEditTask(task: LeadTaskRecord) {
+    setSelectedTask(task)
+    setDraftTask(taskToInput(task))
+    setLeadSearch('')
+    setIsTaskModalOpen(true)
+    setMessage('')
+  }
+
+  function closeTaskModal() {
+    if (isSaving) return
+    setSelectedTask(null)
+    setDraftTask(createEmptyTaskInput())
+    setLeadSearch('')
+    setIsTaskModalOpen(false)
+  }
+
+  async function handleSaveTask() {
+    if (!draftTask.task_title.trim()) {
+      setMessage('请填写任务标题。')
+      return
+    }
+    setIsSaving(true)
+    const result = selectedTask ? await updateTask(selectedTask.id, draftTask) : await createTask(draftTask)
+    setIsSaving(false)
+    if (result.error || !result.task) {
+      setMessage(result.error ?? '保存任务失败')
+      return
+    }
+    setTaskRecords((current) => upsertById(current, result.task as LeadTaskRecord))
+    setMessage('任务已保存。')
+    setSelectedTask(null)
+    setDraftTask(createEmptyTaskInput())
+  }
+
+  async function handleMarkTaskInvalid() {
+    if (!selectedTask) return
+    setIsSaving(true)
+    const result = await markTaskInvalid(selectedTask.id)
+    setIsSaving(false)
+    if (result.error) {
+      setMessage(result.error)
+      return
+    }
+    setTaskRecords((current) =>
+      current.map((task) => (task.id === selectedTask.id ? { ...task, status: 'invalid' } : task)),
+    )
+    setMessage('任务已标记为无效。')
+    closeTaskModal()
+  }
+
   return (
     <section>
       <PageHeader
         title="开发任务"
-        description="按照客户阶段安排跟进动作，后续支持看板、提醒和批量分配。"
-        action={<button className="primary-button">新建任务</button>}
+        description="从 Supabase 读取真实跟进任务，按状态分栏管理客户开发动作。"
+        action={<button className="primary-button" onClick={openNewTask}>新建任务</button>}
       />
 
-      <div className="kanban">
-        {(['pending', 'in_progress', 'completed'] as TaskStatus[]).map((status) => (
-          <section className="task-column" key={status}>
-            <div className="section-title">
-              <h2>{taskStatusLabel[status]}</h2>
-              <span>{tasks.filter((task) => task.status === status).length}</span>
-            </div>
-            <div className="stack">
-              {tasks
-                .filter((task) => task.status === status)
-                .map((task) => (
-                  <article className="task-card" key={task.id}>
-                    <strong>{task.title}</strong>
-                    <p>{task.leadName}</p>
-                    <div>
-                      <StatusPill tone={task.priority === '高' ? 'orange' : 'blue'}>
-                        {task.priority}优先级
-                      </StatusPill>
-                      <span>{task.dueDate}</span>
-                    </div>
-                  </article>
+      {message ? <p className="warning-box">{message}</p> : null}
+      {isLoading ? <p className="hint-text">正在读取跟进任务...</p> : null}
+      {!isLoading && taskRecords.length === 0 ? (
+        <section className="panel empty-state">暂无跟进任务，可点击右上角新建任务。</section>
+      ) : null}
+
+      <div className="kanban task-kanban">
+        {taskBoardStatuses.map((status) => {
+          const columnTasks = taskRecords.filter((task) => task.status === status)
+          return (
+            <section className="task-column" key={status}>
+              <div className="section-title">
+                <h2>{leadTaskStatusLabels[status]}</h2>
+                <span>{columnTasks.length}</span>
+              </div>
+              <div className="stack">
+                {columnTasks.map((task) => (
+                  <button className="task-card" key={task.id} type="button" onClick={() => openEditTask(task)}>
+                    <strong>{task.task_title}</strong>
+                    <p>{task.lead_company_name}</p>
+                    <dl className="task-meta">
+                      <div>
+                        <dt>类型</dt>
+                        <dd>{task.task_type}</dd>
+                      </div>
+                      <div>
+                        <dt>优先级</dt>
+                        <dd>{leadTaskPriorityLabels[task.priority]}</dd>
+                      </div>
+                      <div>
+                        <dt>截止</dt>
+                        <dd>{task.due_date || '-'}</dd>
+                      </div>
+                    </dl>
+                    <span className={`lead-tag ${getLeadStatusClass(leadTaskStatusLabels[task.status])}`}>
+                      {leadTaskStatusLabels[task.status]}
+                    </span>
+                  </button>
                 ))}
-            </div>
-          </section>
-        ))}
+              </div>
+            </section>
+          )
+        })}
       </div>
+
+      {isTaskModalOpen ? (
+        <Modal title={selectedTask ? '任务详情' : '新建任务'} onClose={closeTaskModal}>
+          <div className="form-grid">
+            <label>
+              <span>选择客户</span>
+              <input
+                type="search"
+                placeholder="搜索公司名"
+                value={leadSearch}
+                onChange={(event) => setLeadSearch(event.target.value)}
+              />
+              <select
+                value={draftTask.lead_id ?? ''}
+                onChange={(event) => setDraftTask((current) => ({ ...current, lead_id: event.target.value || null }))}
+              >
+                <option value="">未关联客户</option>
+                {filteredLeadOptions.map((lead) => (
+                  <option key={lead.id} value={lead.id}>{lead.company_name}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>任务类型</span>
+              <select
+                value={draftTask.task_type}
+                onChange={(event) => setDraftTask((current) => ({ ...current, task_type: event.target.value }))}
+              >
+                {taskTypeOptions.map((type) => <option key={type}>{type}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>任务标题</span>
+              <input
+                value={draftTask.task_title}
+                onChange={(event) => setDraftTask((current) => ({ ...current, task_title: event.target.value }))}
+              />
+            </label>
+            <label>
+              <span>截止日期</span>
+              <input
+                type="date"
+                value={draftTask.due_date}
+                onChange={(event) => setDraftTask((current) => ({ ...current, due_date: event.target.value }))}
+              />
+            </label>
+            <label>
+              <span>状态</span>
+              <select
+                value={draftTask.status}
+                onChange={(event) => setDraftTask((current) => ({ ...current, status: event.target.value as LeadTaskStatus }))}
+              >
+                {taskBoardStatuses.map((status) => <option key={status} value={status}>{leadTaskStatusLabels[status]}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>优先级</span>
+              <select
+                value={draftTask.priority}
+                onChange={(event) => setDraftTask((current) => ({ ...current, priority: event.target.value as LeadTaskPriority }))}
+              >
+                {Object.entries(leadTaskPriorityLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>负责人</span>
+              <input
+                value={draftTask.owner_name}
+                onChange={(event) => setDraftTask((current) => ({ ...current, owner_name: event.target.value }))}
+              />
+            </label>
+            <label className="full-span">
+              <span>任务描述</span>
+              <textarea
+                value={draftTask.task_description}
+                onChange={(event) => setDraftTask((current) => ({ ...current, task_description: event.target.value }))}
+                rows={5}
+              />
+            </label>
+          </div>
+
+          {selectedTask ? (
+            <div className="modal-meta">
+              <span>客户公司：{selectedTask.lead_company_name}</span>
+              <span>创建时间：{formatDate(selectedTask.created_at)}</span>
+              <span>更新时间：{formatDate(selectedTask.updated_at)}</span>
+            </div>
+          ) : null}
+
+          <div className="modal-actions">
+            {selectedTask ? <button className="ghost-button danger-button" onClick={() => void handleMarkTaskInvalid()}>标记无效</button> : null}
+            <button className="ghost-button" onClick={closeTaskModal}>关闭</button>
+            <button className="primary-button" disabled={isSaving} onClick={() => void handleSaveTask()}>
+              {isSaving ? '保存中...' : '保存任务'}
+            </button>
+          </div>
+        </Modal>
+      ) : null}
     </section>
   )
 }
 
 function TemplatesPage() {
+  const [templateRecords, setTemplateRecords] = useState<EmailTemplateRecord[]>([])
+  const [leadOptions, setLeadOptions] = useState<LeadSelectOption[]>([])
+  const [message, setMessage] = useState('')
+  const [usedDefault, setUsedDefault] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
+  const [selectedTemplate, setSelectedTemplate] = useState<EmailTemplateRecord | null>(null)
+  const [draftTemplate, setDraftTemplate] = useState<EmailTemplateInput>(createEmptyTemplateInput())
+  const [previewLeadId, setPreviewLeadId] = useState('')
+  const [isTemplateModalOpen, setIsTemplateModalOpen] = useState(false)
+  const [customerTypeFilter, setCustomerTypeFilter] = useState('all')
+  const [developmentStageFilter, setDevelopmentStageFilter] = useState('all')
+  const [activeFilter, setActiveFilter] = useState('all')
+
+  useEffect(() => {
+    let mounted = true
+    async function loadTemplates() {
+      const [templatesResult, leadsResult] = await Promise.all([fetchEmailTemplates(), fetchLeadsForTaskSelect()])
+      if (!mounted) return
+      setTemplateRecords(templatesResult.templates)
+      setUsedDefault(templatesResult.usedDefault)
+      setLeadOptions(leadsResult.leads)
+      setMessage(templatesResult.error ?? leadsResult.error ?? '')
+    }
+    void loadTemplates()
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+  const previewLead = leadOptions.find((lead) => lead.id === previewLeadId) ?? null
+  const renderedPreview = renderTemplateWithLead(draftTemplate, previewLead)
+  const customerTypeOptions = useMemo(
+    () => Array.from(new Set(templateRecords.map((template) => template.customer_type).filter(Boolean))).sort(),
+    [templateRecords],
+  )
+  const developmentStageOptions = useMemo(
+    () => Array.from(new Set(templateRecords.map((template) => template.development_stage).filter(Boolean))).sort(),
+    [templateRecords],
+  )
+  const filteredTemplateRecords = useMemo(
+    () => templateRecords.filter((template) => {
+      const matchesCustomerType = customerTypeFilter === 'all' || template.customer_type === customerTypeFilter
+      const matchesDevelopmentStage = developmentStageFilter === 'all' || template.development_stage === developmentStageFilter
+      const matchesActive = activeFilter === 'all'
+        || (activeFilter === 'active' && template.is_active)
+        || (activeFilter === 'inactive' && !template.is_active)
+      return matchesCustomerType && matchesDevelopmentStage && matchesActive
+    }),
+    [activeFilter, customerTypeFilter, developmentStageFilter, templateRecords],
+  )
+  const hasLegacyDefaultTemplates = templateRecords.some(isLegacyDefaultTemplate)
+
+  function openNewTemplate() {
+    setSelectedTemplate(null)
+    setDraftTemplate(createEmptyTemplateInput())
+    setPreviewLeadId('')
+    setIsTemplateModalOpen(true)
+    setMessage('')
+  }
+
+  function openEditTemplate(template: EmailTemplateRecord) {
+    setSelectedTemplate(template)
+    setDraftTemplate(templateToInput(template))
+    setPreviewLeadId('')
+    setIsTemplateModalOpen(true)
+    setMessage('')
+  }
+
+  function closeTemplateModal() {
+    if (isSaving) return
+    setIsTemplateModalOpen(false)
+    setSelectedTemplate(null)
+    setDraftTemplate(createEmptyTemplateInput())
+  }
+
+  async function handleSaveTemplate() {
+    if (!draftTemplate.template_name.trim() || !draftTemplate.subject.trim() || !draftTemplate.body.trim()) {
+      setMessage('请填写模板名称、邮件标题和邮件正文。')
+      return
+    }
+    setIsSaving(true)
+    const shouldCreate = !selectedTemplate || selectedTemplate.id.startsWith('default-')
+    const result = shouldCreate
+      ? await createEmailTemplate(draftTemplate)
+      : await updateEmailTemplate(selectedTemplate.id, draftTemplate)
+    setIsSaving(false)
+    if (result.error || !result.template) {
+      setMessage(result.error ?? '保存模板失败')
+      return
+    }
+    setTemplateRecords((current) => upsertById(current.filter((template) => !template.id.startsWith('default-')), result.template as EmailTemplateRecord))
+    setUsedDefault(false)
+    setMessage('模板已保存。')
+    closeTemplateModal()
+  }
+
+  async function handleDeleteTemplate() {
+    if (!selectedTemplate) return
+    if (selectedTemplate.id.startsWith('default-')) {
+      setMessage('默认模板尚未写入数据库，无需删除。')
+      closeTemplateModal()
+      return
+    }
+    if (!window.confirm('确认删除该邮件模板吗？删除后不可恢复。')) {
+      return
+    }
+    setIsSaving(true)
+    const result = await deleteEmailTemplate(selectedTemplate.id)
+    setIsSaving(false)
+    if (result.error) {
+      setMessage(result.error)
+      return
+    }
+    setTemplateRecords((current) => current.filter((template) => template.id !== selectedTemplate.id))
+    setMessage('模板已删除。')
+    closeTemplateModal()
+  }
+
+  async function handleSeedDefaultTemplates() {
+    setIsSaving(true)
+    const result = await seedDefaultTemplates()
+    setIsSaving(false)
+    if (result.error) {
+      setMessage(result.error)
+      return
+    }
+    setTemplateRecords(result.templates)
+    setUsedDefault(false)
+    setMessage(`已写入 ${result.insertedCount} 个模板，跳过 ${result.skippedCount} 个已存在模板。`)
+  }
+
+  async function handleCleanupOldDefaultTemplates() {
+    if (!window.confirm('确认清理旧默认模板 new_lead 和 quote_follow_up 吗？不会删除用户自建模板。')) {
+      return
+    }
+    setIsSaving(true)
+    const result = await cleanupOldDefaultTemplates()
+    setIsSaving(false)
+    if (result.error) {
+      setMessage(result.error)
+      return
+    }
+    setTemplateRecords((current) => current.filter((template) => !isLegacyDefaultTemplate(template)))
+    setMessage(`已清理 ${result.deletedCount} 个旧默认模板。`)
+  }
+
+  async function copyText(value: string, successMessage: string) {
+    await navigator.clipboard.writeText(value)
+    setMessage(successMessage)
+  }
+
   return (
     <section>
       <PageHeader
         title="邮件模板"
-        description="维护开发邮件内容。第一阶段只做模板库页面，不发送邮件。"
-        action={<button className="primary-button">新建模板</button>}
+        description="维护开发邮件内容，只支持复制和模板管理，不自动发送邮件。"
+        action={<button className="primary-button" onClick={openNewTemplate}>新建模板</button>}
       />
 
+      {message ? <p className={usedDefault ? 'warning-box' : 'hint-text'}>{message}</p> : null}
+      <div className="template-actions">
+        <button className="primary-button" disabled={isSaving || !isSupabaseConfigured} onClick={() => void handleSeedDefaultTemplates()}>
+          写入英文模板库到数据库
+        </button>
+        {hasLegacyDefaultTemplates ? (
+          <button className="ghost-button danger-button" disabled={isSaving || !isSupabaseConfigured} onClick={() => void handleCleanupOldDefaultTemplates()}>
+            清理旧默认模板
+          </button>
+        ) : null}
+      </div>
+
+      <section className="panel template-filter-panel">
+        <label>
+          <span>客户类型</span>
+          <select value={customerTypeFilter} onChange={(event) => setCustomerTypeFilter(event.target.value)}>
+            <option value="all">全部客户类型</option>
+            {customerTypeOptions.map((customerType) => (
+              <option key={customerType} value={customerType}>{getEmailTemplateCustomerTypeLabel(customerType)}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>开发阶段</span>
+          <select value={developmentStageFilter} onChange={(event) => setDevelopmentStageFilter(event.target.value)}>
+            <option value="all">全部开发阶段</option>
+            {developmentStageOptions.map((stage) => (
+              <option key={stage} value={stage}>{getEmailTemplateStageLabel(stage)}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>启用状态</span>
+          <select value={activeFilter} onChange={(event) => setActiveFilter(event.target.value)}>
+            <option value="all">全部状态</option>
+            <option value="active">仅启用</option>
+            <option value="inactive">仅停用</option>
+          </select>
+        </label>
+        <span>当前显示 {filteredTemplateRecords.length} / {templateRecords.length} 个模板</span>
+      </section>
+
       <section className="panel template-list">
-        {emailTemplates.map((template) => (
-          <article className="template-card" key={template.id}>
+        {filteredTemplateRecords.length === 0 ? (
+          <div className="empty-state">没有符合当前筛选条件的邮件模板。</div>
+        ) : null}
+        {filteredTemplateRecords.map((template) => (
+          <button className="template-card" key={template.id} type="button" onClick={() => openEditTemplate(template)}>
             <div>
-              <span>{template.category}</span>
-              <h2>{template.name}</h2>
+              <span>{getEmailTemplateCustomerTypeLabel(template.customer_type)} · {getEmailTemplateStageLabel(template.development_stage)}</span>
+              <h2>{template.template_name}</h2>
               <p>{template.subject}</p>
             </div>
-            <pre>{template.preview}</pre>
-          </article>
+            <pre>{template.body}</pre>
+            <span className={`lead-tag ${template.is_active ? 'status-replied' : 'status-paused'}`}>
+              {template.is_active ? '启用' : '停用'}
+            </span>
+          </button>
         ))}
       </section>
+
+      {isTemplateModalOpen ? (
+        <Modal title={selectedTemplate ? '模板详情' : '新建模板'} onClose={closeTemplateModal}>
+          <div className="form-grid">
+            <label>
+              <span>模板名称</span>
+              <input
+                value={draftTemplate.template_name}
+                onChange={(event) => setDraftTemplate((current) => ({ ...current, template_name: event.target.value }))}
+              />
+            </label>
+            <label>
+              <span>客户类型</span>
+              <input
+                value={draftTemplate.customer_type}
+                onChange={(event) => setDraftTemplate((current) => ({ ...current, customer_type: event.target.value }))}
+              />
+            </label>
+            <label>
+              <span>开发阶段</span>
+              <input
+                value={draftTemplate.development_stage}
+                onChange={(event) => setDraftTemplate((current) => ({ ...current, development_stage: event.target.value }))}
+              />
+            </label>
+            <label>
+              <span>语言</span>
+              <input
+                value={draftTemplate.language}
+                onChange={(event) => setDraftTemplate((current) => ({ ...current, language: event.target.value || 'en' }))}
+              />
+            </label>
+            <label className="full-span">
+              <span>邮件标题 subject</span>
+              <input
+                value={draftTemplate.subject}
+                onChange={(event) => setDraftTemplate((current) => ({ ...current, subject: event.target.value }))}
+              />
+            </label>
+            <label className="full-span">
+              <span>邮件正文 body</span>
+              <textarea
+                className="template-body-input"
+                value={draftTemplate.body}
+                onChange={(event) => setDraftTemplate((current) => ({ ...current, body: event.target.value }))}
+                rows={12}
+              />
+            </label>
+            <label className="checkbox-line">
+              <input
+                type="checkbox"
+                checked={draftTemplate.is_active}
+                onChange={(event) => setDraftTemplate((current) => ({ ...current, is_active: event.target.checked }))}
+              />
+              <span>启用模板</span>
+            </label>
+          </div>
+
+          <section className="variable-box">
+            <h3>可用变量说明</h3>
+            <div>
+              {templateVariables.map((variable) => <code key={variable}>{variable}</code>)}
+            </div>
+          </section>
+
+          <section className="preview-box">
+            <div className="section-title">
+              <h2>预览效果</h2>
+              <select value={previewLeadId} onChange={(event) => setPreviewLeadId(event.target.value)}>
+                <option value="">选择客户预览</option>
+                {leadOptions.map((lead) => <option key={lead.id} value={lead.id}>{lead.company_name}</option>)}
+              </select>
+            </div>
+            <strong>{renderedPreview.subject || '邮件标题预览'}</strong>
+            <pre>{renderedPreview.body || '邮件正文预览'}</pre>
+            <div className="modal-actions">
+              <button className="ghost-button" onClick={() => void copyText(renderedPreview.subject, '已复制邮件标题。')}>
+                <Copy size={15} aria-hidden="true" />复制标题
+              </button>
+              <button className="ghost-button" onClick={() => void copyText(renderedPreview.body, '已复制邮件正文。')}>
+                <Copy size={15} aria-hidden="true" />复制正文
+              </button>
+              <button className="ghost-button" onClick={() => void copyText(`${renderedPreview.subject}\n\n${renderedPreview.body}`, '已复制完整邮件。')}>
+                <Copy size={15} aria-hidden="true" />复制完整邮件
+              </button>
+            </div>
+          </section>
+
+          <div className="modal-actions">
+            {selectedTemplate ? (
+              <button className="ghost-button danger-button" onClick={() => void handleDeleteTemplate()}>
+                <Trash2 size={15} aria-hidden="true" />删除模板
+              </button>
+            ) : null}
+            <button className="ghost-button" onClick={closeTemplateModal}>关闭</button>
+            <button className="primary-button" disabled={isSaving} onClick={() => void handleSaveTemplate()}>
+              {isSaving ? '保存中...' : '保存模板'}
+            </button>
+          </div>
+        </Modal>
+      ) : null}
     </section>
   )
 }
@@ -1219,6 +1860,22 @@ function SettingsPage() {
         </section>
       </div>
     </section>
+  )
+}
+
+function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-panel" role="dialog" aria-modal="true" aria-label={title}>
+        <header className="modal-header">
+          <h2>{title}</h2>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="关闭弹窗">
+            <X size={18} aria-hidden="true" />
+          </button>
+        </header>
+        <div className="modal-body">{children}</div>
+      </section>
+    </div>
   )
 }
 

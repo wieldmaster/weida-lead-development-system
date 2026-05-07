@@ -175,3 +175,70 @@ export type LeadPoolRecord = {
   status: string | null
   created_at: string
 }
+
+export type LeadTaskStatus = 'pending' | 'in_progress' | 'completed' | 'paused' | 'invalid'
+
+export type LeadTaskPriority = 'low' | 'medium' | 'high' | 'urgent'
+
+export type LeadTaskRecord = {
+  id: string
+  lead_id: string | null
+  lead_company_name: string
+  task_type: string
+  task_title: string
+  task_description: string | null
+  due_date: string | null
+  status: LeadTaskStatus
+  priority: LeadTaskPriority
+  owner_name: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type LeadTaskInput = {
+  lead_id: string | null
+  task_type: string
+  task_title: string
+  task_description: string
+  due_date: string
+  status: LeadTaskStatus
+  priority: LeadTaskPriority
+  owner_name: string
+}
+
+export type LeadSelectOption = {
+  id: string
+  company_name: string
+  contact_name: string | null
+  email: string | null
+  phone: string | null
+  whatsapp: string | null
+  country: string | null
+  region: string | null
+  customer_type: string | null
+  product_keywords: string | null
+  matched_weida_product_lines?: string | null
+}
+
+export type EmailTemplateRecord = {
+  id: string
+  template_name: string
+  customer_type: string
+  development_stage: string
+  subject: string
+  body: string
+  language: string
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type EmailTemplateInput = {
+  template_name: string
+  customer_type: string
+  development_stage: string
+  subject: string
+  body: string
+  language: string
+  is_active: boolean
+}
