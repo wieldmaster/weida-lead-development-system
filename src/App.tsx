@@ -12,7 +12,7 @@ import {
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { NavLink, Route, Routes, useParams } from 'react-router-dom'
-import { useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, DragEvent, ReactNode } from 'react'
 import './App.css'
 import {
@@ -22,7 +22,20 @@ import {
   leads,
   tasks,
 } from './data'
-import type { ImportPreviewResult, Lead, LeadStatus, SheetType, StandardLeadField, TaskStatus } from './types'
+import { isSupabaseConfigured } from './lib/supabase'
+import { importLeadListSheet } from './services/leadImportService'
+import { fetchLeadPoolRecords } from './services/leadPoolService'
+import type {
+  ImportPreviewResult,
+  ImportProgress,
+  Lead,
+  LeadImportResult,
+  LeadPoolRecord,
+  LeadStatus,
+  SheetType,
+  StandardLeadField,
+  TaskStatus,
+} from './types'
 import {
   applyColumnMappingsToSheet,
   displayWebsite,
@@ -73,9 +86,9 @@ function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">W</div>
+          <div className="brand-mark">w</div>
           <div>
-            <strong>WEIDA</strong>
+            <strong>wieldmaster</strong>
             <span>业务开发系统</span>
           </div>
         </div>
@@ -232,7 +245,11 @@ function LeadImportPage() {
   const [preview, setPreview] = useState<ImportPreviewResult | null>(null)
   const [selectedSheetIndex, setSelectedSheetIndex] = useState(0)
   const [isParsing, setIsParsing] = useState(false)
+  const [isImporting, setIsImporting] = useState(false)
   const [message, setMessage] = useState('')
+  const [importResult, setImportResult] = useState<LeadImportResult | null>(null)
+  const [parseProgress, setParseProgress] = useState<ImportProgress | null>(null)
+  const [importProgress, setImportProgress] = useState<ImportProgress | null>(null)
 
   const selectedSheet = preview?.sheets[selectedSheetIndex]
 
@@ -244,16 +261,29 @@ function LeadImportPage() {
     setUploadedFile(file)
     setIsParsing(true)
     setMessage('')
-    const result = await parseLeadFile(file)
-    setPreview(result)
-    setSelectedSheetIndex(result.selectedSheetIndex)
-    setIsParsing(false)
-    if (result.error) {
-      setMessage(result.error)
-    } else if (!result.sheets.some((sheet) => sheet.sheetType === 'lead_list')) {
-      setMessage('未识别到客户明细表，请手动选择 sheet。')
-    } else {
-      setMessage('文件已读取，系统已默认选择第一个客户明细表进行预览。')
+    setImportResult(null)
+    setImportProgress(null)
+    setParseProgress({
+      phase: 'reading',
+      label: '等待读取文件',
+      current: 0,
+      total: 1,
+      percent: 0,
+      detail: file.name,
+    })
+    try {
+      const result = await parseLeadFile(file, setParseProgress)
+      setPreview(result)
+      setSelectedSheetIndex(result.selectedSheetIndex)
+      if (result.error) {
+        setMessage(result.error)
+      } else if (!result.sheets.some((sheet) => sheet.sheetType === 'lead_list')) {
+        setMessage('未识别到客户明细表，请手动选择 sheet。')
+      } else {
+        setMessage('文件已读取，系统已默认选择第一个客户明细表进行预览。')
+      }
+    } finally {
+      setIsParsing(false)
     }
   }
 
@@ -294,6 +324,70 @@ function LeadImportPage() {
     await handleFile(uploadedFile)
   }
 
+  async function handleImportToLeadPool() {
+    if (!selectedSheet || !uploadedFile) {
+      setMessage('请先上传并选择客户明细 sheet。')
+      return
+    }
+    if (selectedSheet.sheetType !== 'lead_list') {
+      setMessage('当前选择的 sheet 不是客户明细表，不能导入客户池。')
+      return
+    }
+    if (!isSupabaseConfigured) {
+      setMessage('请先配置 Supabase 环境变量')
+      return
+    }
+    const hasIdentityMapping = selectedSheet.mappings.some(
+      (mapping) =>
+        !mapping.isDuplicate &&
+        ['company_name', 'email', 'phone', 'website'].includes(mapping.standardField),
+    )
+    if (!hasIdentityMapping) {
+      setMessage('字段映射中至少需要公司名称、邮箱、电话或网站任一字段。')
+      return
+    }
+    const ok = window.confirm(
+      `将导入 ${selectedSheet.stats.validRows} 条有效客户，跳过 ${selectedSheet.stats.skippedRows} 条无效行。是否继续？`,
+    )
+    if (!ok) {
+      return
+    }
+
+    setIsImporting(true)
+    setMessage('正在导入客户池...')
+    setImportResult(null)
+    setImportProgress({
+      phase: 'creating_batch',
+      label: '准备导入客户池',
+      current: 0,
+      total: Math.max(selectedSheet.rows.length, 1),
+      percent: 0,
+      detail: selectedSheet.sheetName,
+    })
+    try {
+      const result = await importLeadListSheet({
+        fileName: uploadedFile.name,
+        sourceType,
+        sheet: selectedSheet,
+        onProgress: setImportProgress,
+      })
+      setImportResult(result)
+      setMessage('客户导入完成。')
+    } catch (error) {
+      setImportProgress({
+        phase: 'error',
+        label: '导入失败',
+        current: 0,
+        total: 1,
+        percent: 100,
+        detail: error instanceof Error ? error.message : '客户导入失败',
+      })
+      setMessage(error instanceof Error ? error.message : '客户导入失败')
+    } finally {
+      setIsImporting(false)
+    }
+  }
+
   return (
     <section>
       <PageHeader
@@ -319,10 +413,12 @@ function LeadImportPage() {
             </div>
             <h2>{isParsing ? '正在解析文件...' : '拖拽或选择客户表'}</h2>
             <p>系统会读取所有 sheet，自动识别表头、字段映射和前 20 行数据预览。</p>
-            <button type="button" className="primary-button" onClick={() => fileInputRef.current?.click()}>
+            <button type="button" className="primary-button" disabled={isParsing || isImporting} onClick={() => fileInputRef.current?.click()}>
               选择文件
             </button>
           </label>
+
+          {parseProgress ? <ImportProgressBar progress={parseProgress} /> : null}
 
           {uploadedFile ? (
             <div className="file-meta">
@@ -361,21 +457,56 @@ function LeadImportPage() {
           </div>
           {message ? <p className={preview?.error ? 'error-text' : 'hint-text'}>{message}</p> : null}
           <div className="upload-actions">
-            <button type="button" className="ghost-button" onClick={() => fileInputRef.current?.click()}>
+            <button type="button" className="ghost-button" disabled={isParsing || isImporting} onClick={() => fileInputRef.current?.click()}>
               重新上传
             </button>
-            <button type="button" className="ghost-button" onClick={() => void handleReidentify()}>
+            <button type="button" className="ghost-button" disabled={isParsing || isImporting} onClick={() => void handleReidentify()}>
               重新识别
             </button>
-            <button type="button" className="primary-button" onClick={() => setMessage('字段映射已确认，本阶段仅保存在页面状态。')}>
+            <button type="button" className="primary-button" disabled={isParsing || isImporting} onClick={() => setMessage('字段映射已确认，本阶段仅保存在页面状态。')}>
               确认映射
             </button>
-            <button type="button" className="primary-button" onClick={() => setMessage('下一阶段将写入客户池。')}>
+            <button type="button" className="primary-button" disabled={isParsing || isImporting} onClick={() => setMessage('下一阶段将写入客户池。')}>
               下一步：准备入库
+            </button>
+            <button type="button" className="primary-button" disabled={isParsing || isImporting} onClick={() => void handleImportToLeadPool()}>
+              {isImporting ? '正在导入...' : '确认导入客户池'}
+            </button>
+          </div>
+          {importProgress ? <ImportProgressBar progress={importProgress} /> : null}
+        </section>
+      </div>
+
+      {importResult ? (
+        <section className="panel import-result-panel">
+          <div className="section-title">
+            <h2>导入结果</h2>
+            <span>批次 ID：{importResult.batchId ?? '-'}</span>
+          </div>
+          <div className="import-stat-grid">
+            <ImportStat label="新增客户数" value={importResult.insertedCount} />
+            <ImportStat label="更新客户数" value={importResult.updatedCount} />
+            <ImportStat label="跳过行数" value={importResult.skippedCount} />
+            <ImportStat label="重复客户数" value={importResult.duplicateCount} />
+            <ImportStat label="错误行数" value={importResult.errorCount} />
+          </div>
+          {importResult.errors.length > 0 ? (
+            <div className="warning-box">
+              {importResult.errors.slice(0, 5).map((error) => (
+                <span key={error}>{error}</span>
+              ))}
+            </div>
+          ) : null}
+          <div className="upload-actions">
+            <NavLink className="primary-button" to="/leads">
+              查看客户开发池
+            </NavLink>
+            <button type="button" className="ghost-button" onClick={() => fileInputRef.current?.click()}>
+              继续导入
             </button>
           </div>
         </section>
-      </div>
+      ) : null}
 
       {preview?.sheets.length ? <ImportRecommendationCard preview={preview} /> : null}
 
@@ -638,6 +769,27 @@ function ImportStat({ label, value }: { label: string; value: ReactNode }) {
   )
 }
 
+function ImportProgressBar({ progress }: { progress: ImportProgress }) {
+  const isError = progress.phase === 'error'
+  return (
+    <div className={`import-progress ${isError ? 'is-error' : ''}`} role="status" aria-live="polite">
+      <div className="import-progress-head">
+        <strong>{progress.label}</strong>
+        <span>{progress.percent}%</span>
+      </div>
+      <div className="import-progress-track" aria-hidden="true">
+        <div className="import-progress-value" style={{ width: `${progress.percent}%` }} />
+      </div>
+      <div className="import-progress-detail">
+        <span>{progress.detail ?? '正在处理数据'}</span>
+        <span>
+          {progress.current}/{progress.total}
+        </span>
+      </div>
+    </div>
+  )
+}
+
 function getSheetTypeTone(sheetType: SheetType): 'blue' | 'green' | 'orange' {
   if (sheetType === 'lead_list') {
     return 'green'
@@ -665,47 +817,145 @@ function getMappingDisplayName(originalColumn: string, standardField: StandardLe
   return /^(序号|编号|no\.?|id)$/i.test(originalColumn.trim()) ? '忽略字段' : '未映射'
 }
 
+function mockLeadPoolRecords(): LeadPoolRecord[] {
+  return leads.map((lead) => ({
+    id: lead.id,
+    company_name: lead.companyName,
+    contact_name: lead.contactName,
+    email: lead.email,
+    phone: lead.phone,
+    whatsapp: null,
+    country: lead.country,
+    region: null,
+    website: lead.website,
+    product_keywords: lead.industry,
+    customer_type: null,
+    source_type: lead.source,
+    source_detail: lead.source,
+    development_level: lead.tier,
+    priority_score: lead.tier === 'A' ? 80 : lead.tier === 'B' ? 60 : 40,
+    status: statusLabel[lead.status],
+    created_at: new Date().toISOString(),
+  }))
+}
+
+function formatDate(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+  return date.toLocaleDateString('zh-CN')
+}
+
 function LeadPoolPage() {
+  const [records, setRecords] = useState<LeadPoolRecord[]>([])
+  const [poolMessage, setPoolMessage] = useState('')
+  const [usedMock, setUsedMock] = useState(false)
+  const [searchKeyword, setSearchKeyword] = useState('')
+  const [levelFilter, setLevelFilter] = useState('全部层级')
+  const [sourceFilter, setSourceFilter] = useState('全部来源')
+
+  useEffect(() => {
+    let mounted = true
+    void fetchLeadPoolRecords().then((result) => {
+      if (!mounted) {
+        return
+      }
+      if (result.usedMock) {
+        setRecords(mockLeadPoolRecords())
+        setUsedMock(true)
+        setPoolMessage(result.error ?? '当前使用示例客户数据。')
+      } else {
+        setRecords(result.records)
+        setUsedMock(false)
+        setPoolMessage(result.records.length === 0 ? 'Supabase 已连接，但客户池暂无数据。' : '')
+      }
+    })
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+  const sourceOptions = useMemo(
+    () => ['全部来源', ...Array.from(new Set(records.map((record) => record.source_type).filter(Boolean) as string[]))],
+    [records],
+  )
+  const filteredRecords = records.filter((record) => {
+    const keyword = searchKeyword.trim().toLowerCase()
+    const matchesKeyword =
+      !keyword ||
+      [
+        record.company_name,
+        record.country,
+        record.region,
+        record.contact_name,
+        record.email,
+        record.phone,
+        record.website,
+        record.product_keywords,
+      ]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(keyword))
+    const matchesLevel = levelFilter === '全部层级' || record.development_level === levelFilter
+    const matchesSource = sourceFilter === '全部来源' || record.source_type === sourceFilter
+    return matchesKeyword && matchesLevel && matchesSource
+  })
+
   return (
     <section>
       <PageHeader
         title="客户开发池"
-        description="集中管理站外客户，后续支持去重、分层、负责人分配和批量创建任务。"
+        description="集中管理已导入客户，支持按层级、来源和关键词筛选。"
         action={<button className="primary-button">新增客户</button>}
       />
+
+      {poolMessage ? <p className={usedMock ? 'warning-box' : 'hint-text'}>{poolMessage}</p> : null}
 
       <div className="toolbar">
         <label className="search-box">
           <Search size={17} aria-hidden="true" />
-          <input type="search" placeholder="搜索公司、国家、行业或邮箱" />
+          <input
+            type="search"
+            placeholder="搜索公司、国家、区域、联系人、邮箱或产品"
+            value={searchKeyword}
+            onChange={(event) => setSearchKeyword(event.target.value)}
+          />
         </label>
-        <select aria-label="客户分层">
+        <select aria-label="客户分层" value={levelFilter} onChange={(event) => setLevelFilter(event.target.value)}>
           <option>全部层级</option>
-          <option>A级客户</option>
-          <option>B级客户</option>
-          <option>C级客户</option>
+          <option>A+</option>
+          <option>A</option>
+          <option>B+</option>
+          <option>B</option>
+          <option>C</option>
+          <option>D</option>
         </select>
-        <select aria-label="开发状态">
-          <option>全部状态</option>
-          <option>新线索</option>
-          <option>开发中</option>
-          <option>已触达</option>
+        <select aria-label="来源筛选" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)}>
+          {sourceOptions.map((source) => (
+            <option key={source}>{source}</option>
+          ))}
         </select>
       </div>
 
       <section className="panel">
         <DataTable
-          columns={['公司', '国家', '行业', '层级', '状态', '负责人', '下次跟进']}
-          rows={leads.map((lead) => [
+          columns={['公司名称', '国家', '区域', '联系人', '邮箱', '电话', '网站', '产品关键词', '开发层级', '优先分', '状态', '来源', '创建时间']}
+          rows={filteredRecords.map((lead) => [
             <NavLink to={`/leads/${lead.id}`} className="table-link" key={lead.id}>
-              {lead.companyName}
+              {lead.company_name}
             </NavLink>,
-            lead.country,
-            lead.industry,
-            lead.tier,
-            statusLabel[lead.status],
-            lead.owner,
-            lead.nextFollowUp,
+            lead.country ?? '-',
+            lead.region ?? '-',
+            lead.contact_name ?? '-',
+            lead.email ?? '-',
+            lead.phone || lead.whatsapp || '-',
+            lead.website ?? '-',
+            lead.product_keywords ?? '-',
+            lead.development_level ?? 'C',
+            lead.priority_score ?? 0,
+            lead.status ?? '待开发',
+            lead.source_type ?? lead.source_detail ?? '-',
+            formatDate(lead.created_at),
           ])}
         />
       </section>

@@ -125,3 +125,53 @@ export type ImportPreviewResult = {
   selectedSheetIndex: number
   error?: string
 }
+
+export type ImportProgressPhase =
+  | 'reading'
+  | 'parsing'
+  | 'detecting'
+  | 'preview'
+  | 'creating_batch'
+  | 'importing_rows'
+  | 'finalizing'
+  | 'completed'
+  | 'error'
+
+export type ImportProgress = {
+  phase: ImportProgressPhase
+  label: string
+  current: number
+  total: number
+  percent: number
+  detail?: string
+}
+
+export type LeadImportResult = {
+  batchId?: string
+  insertedCount: number
+  updatedCount: number
+  skippedCount: number
+  duplicateCount: number
+  errorCount: number
+  errors: string[]
+}
+
+export type LeadPoolRecord = {
+  id: string
+  company_name: string
+  contact_name: string | null
+  email: string | null
+  phone: string | null
+  whatsapp: string | null
+  country: string | null
+  region: string | null
+  website: string | null
+  product_keywords: string | null
+  customer_type: string | null
+  source_type: string | null
+  source_detail: string | null
+  development_level: string | null
+  priority_score: number | null
+  status: string | null
+  created_at: string
+}
