@@ -847,6 +847,60 @@ function formatDate(value: string) {
   return date.toLocaleDateString('zh-CN')
 }
 
+function getWebsiteHref(value: string | null): string {
+  const website = value?.trim()
+  if (!website || /\s/.test(website)) {
+    return ''
+  }
+  const candidate = /^https?:\/\//i.test(website) ? website : `https://${website}`
+  try {
+    const url = new URL(candidate)
+    return url.hostname.includes('.') ? url.toString() : ''
+  } catch {
+    return ''
+  }
+}
+
+function formatWebsiteLabel(value: string | null): string {
+  const website = value?.trim()
+  if (!website) {
+    return '-'
+  }
+  return website.replace(/^https?:\/\//i, '').replace(/\/$/, '')
+}
+
+function normalizeLeadStatus(value: string | null): string {
+  const status = value?.trim()
+  if (!status) {
+    return '待开发'
+  }
+  if (status.includes('回复')) return '已回复'
+  if (status.includes('报价')) return '报价中'
+  if (status.includes('暂缓') || status.includes('暂停')) return '暂缓'
+  if (status.includes('无效') || status.includes('失效')) return '无效'
+  if (status.includes('联系') || status.includes('触达')) return '已联系'
+  return status === '新线索' || status === '已分层' || status === '开发中' ? '待开发' : status
+}
+
+function getLeadLevelClass(value: string | null): string {
+  const level = value?.trim().toUpperCase() || 'C'
+  if (level === 'A+') return 'level-a-plus'
+  if (level === 'A') return 'level-a'
+  if (level === 'B+') return 'level-b-plus'
+  if (level === 'B') return 'level-b'
+  if (level === 'D') return 'level-d'
+  return 'level-c'
+}
+
+function getLeadStatusClass(value: string): string {
+  if (value === '已联系') return 'status-contacted'
+  if (value === '已回复') return 'status-replied'
+  if (value === '报价中') return 'status-quoting'
+  if (value === '暂缓') return 'status-paused'
+  if (value === '无效') return 'status-invalid'
+  return 'status-pending'
+}
+
 function LeadPoolPage() {
   const [records, setRecords] = useState<LeadPoolRecord[]>([])
   const [poolMessage, setPoolMessage] = useState('')
@@ -890,8 +944,6 @@ function LeadPoolPage() {
         record.region,
         record.contact_name,
         record.email,
-        record.phone,
-        record.website,
         record.product_keywords,
       ]
         .filter(Boolean)
@@ -900,6 +952,12 @@ function LeadPoolPage() {
     const matchesSource = sourceFilter === '全部来源' || record.source_type === sourceFilter
     return matchesKeyword && matchesLevel && matchesSource
   })
+  const poolStats = {
+    total: records.length,
+    email: records.filter((record) => Boolean(record.email?.trim())).length,
+    phone: records.filter((record) => Boolean(record.phone?.trim() || record.whatsapp?.trim())).length,
+    website: records.filter((record) => Boolean(getWebsiteHref(record.website))).length,
+  }
 
   return (
     <section>
@@ -910,6 +968,13 @@ function LeadPoolPage() {
       />
 
       {poolMessage ? <p className={usedMock ? 'warning-box' : 'hint-text'}>{poolMessage}</p> : null}
+
+      <div className="metric-grid lead-pool-stats">
+        <MetricCard title="客户总数" value={poolStats.total} detail="当前客户池记录" icon={UsersRound} />
+        <MetricCard title="有邮箱客户数" value={poolStats.email} detail="可优先开发信触达" icon={Mail} />
+        <MetricCard title="有电话客户数" value={poolStats.phone} detail="可电话或 WhatsApp 跟进" icon={ClipboardList} />
+        <MetricCard title="有网站客户数" value={poolStats.website} detail="可查看官网背景" icon={Database} />
+      </div>
 
       <div className="toolbar">
         <label className="search-box">
@@ -937,26 +1002,40 @@ function LeadPoolPage() {
         </select>
       </div>
 
-      <section className="panel">
+      <section className="panel lead-pool-panel">
         <DataTable
-          columns={['公司名称', '国家', '区域', '联系人', '邮箱', '电话', '网站', '产品关键词', '开发层级', '优先分', '状态', '来源', '创建时间']}
-          rows={filteredRecords.map((lead) => [
-            <NavLink to={`/leads/${lead.id}`} className="table-link" key={lead.id}>
-              {lead.company_name}
-            </NavLink>,
-            lead.country ?? '-',
-            lead.region ?? '-',
-            lead.contact_name ?? '-',
-            lead.email ?? '-',
-            lead.phone || lead.whatsapp || '-',
-            lead.website ?? '-',
-            lead.product_keywords ?? '-',
-            lead.development_level ?? 'C',
-            lead.priority_score ?? 0,
-            lead.status ?? '待开发',
-            lead.source_type ?? lead.source_detail ?? '-',
-            formatDate(lead.created_at),
-          ])}
+          className="lead-pool-table"
+          columns={['公司名称', '国家', '区域', '联系人', '邮箱', '电话', '网站', '产品/主营/采购需求', '开发层级', '优先分', '状态', '来源', '创建时间']}
+          rows={filteredRecords.map((lead) => {
+            const websiteHref = getWebsiteHref(lead.website)
+            const leadStatus = normalizeLeadStatus(lead.status)
+            const level = lead.development_level?.trim() || 'C'
+            return [
+              <NavLink to={`/leads/${lead.id}`} className="table-link lead-company-link" key={lead.id} title={lead.company_name}>
+                {lead.company_name}
+              </NavLink>,
+              lead.country ?? '-',
+              lead.region ?? '-',
+              lead.contact_name ?? '-',
+              lead.email ?? '-',
+              lead.phone || lead.whatsapp || '-',
+              websiteHref ? (
+                <a className="table-link website-link" href={websiteHref} target="_blank" rel="noreferrer" title={websiteHref}>
+                  {formatWebsiteLabel(lead.website)}
+                </a>
+              ) : (
+                '-'
+              ),
+              <span className="truncate-cell" title={lead.product_keywords ?? '-'}>
+                {lead.product_keywords ?? '-'}
+              </span>,
+              <span className={`lead-tag ${getLeadLevelClass(level)}`}>{level}</span>,
+              lead.priority_score ?? 0,
+              <span className={`lead-tag ${getLeadStatusClass(leadStatus)}`}>{leadStatus}</span>,
+              lead.source_type ?? lead.source_detail ?? '-',
+              formatDate(lead.created_at),
+            ]
+          })}
         />
       </section>
     </section>
@@ -1143,10 +1222,10 @@ function SettingsPage() {
   )
 }
 
-function DataTable({ columns, rows }: { columns: string[]; rows: ReactNode[][] }) {
+function DataTable({ columns, rows, className }: { columns: string[]; rows: ReactNode[][]; className?: string }) {
   return (
     <div className="table-wrap">
-      <table>
+      <table className={className}>
         <thead>
           <tr>
             {columns.map((column) => (

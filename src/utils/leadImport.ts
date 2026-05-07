@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx'
 import type {
   ColumnMapping,
   HeaderDetectionResult,
+  ImportProgress,
   ImportPreviewResult,
   ImportSheetPreview,
   NormalizedLeadRow,
@@ -376,23 +377,107 @@ export const leadImportSheetTypeExamples: Array<{
   { sheetName: '09_全量客户池处理说明', expectedSheetType: 'rules', expectedAction: '不建议导入' },
 ]
 
-export async function parseLeadFile(file: File): Promise<ImportPreviewResult> {
+type ProgressReporter = (progress: ImportProgress) => void
+
+function reportImportProgress(
+  onProgress: ProgressReporter | undefined,
+  progress: Omit<ImportProgress, 'percent'> & { percent?: number },
+) {
+  if (!onProgress) {
+    return
+  }
+  const percent =
+    progress.percent ??
+    (progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : progress.current > 0 ? 100 : 0)
+  onProgress({
+    ...progress,
+    percent: Math.max(0, Math.min(100, percent)),
+  })
+}
+
+async function yieldToBrowser() {
+  await new Promise((resolve) => {
+    window.setTimeout(resolve, 0)
+  })
+}
+
+export async function parseLeadFile(file: File, onProgress?: ProgressReporter): Promise<ImportPreviewResult> {
   const extension = getFileExtension(file.name)
   if (!['xlsx', 'xls', 'csv'].includes(extension)) {
     return buildErrorResult(file, '仅支持 .xlsx、.xls、.csv 文件。')
   }
 
   try {
+    reportImportProgress(onProgress, {
+      phase: 'reading',
+      label: '正在读取文件',
+      current: 1,
+      total: 4,
+      percent: 12,
+      detail: file.name,
+    })
+    await yieldToBrowser()
+
     const workbookSheets = extension === 'csv' ? await parseCsvFile(file) : await parseWorkbookFile(file)
     if (workbookSheets.length === 0) {
+      reportImportProgress(onProgress, {
+        phase: 'error',
+        label: '解析失败',
+        current: 0,
+        total: 1,
+        percent: 100,
+        detail: '文件中没有可读取的 sheet 或数据行。',
+      })
       return buildErrorResult(file, '文件中没有可读取的 sheet 或数据行。')
     }
 
-    const sheets = workbookSheets.map(({ name, rows }) => buildSheetPreview(name, rows))
+    reportImportProgress(onProgress, {
+      phase: 'parsing',
+      label: '正在解析工作表',
+      current: 1,
+      total: Math.max(workbookSheets.length, 1),
+      percent: 28,
+      detail: `已读取 ${workbookSheets.length} 个 sheet`,
+    })
+    await yieldToBrowser()
+
+    const sheets: ImportSheetPreview[] = []
+    for (const [index, sheet] of workbookSheets.entries()) {
+      reportImportProgress(onProgress, {
+        phase: 'detecting',
+        label: '正在识别 sheet 类型和字段',
+        current: index + 1,
+        total: workbookSheets.length,
+        percent: Math.round(32 + ((index + 1) / workbookSheets.length) * 50),
+        detail: sheet.name,
+      })
+      sheets.push(buildSheetPreview(sheet.name, sheet.rows))
+      await yieldToBrowser()
+    }
+
     const selectedSheetIndex = Math.max(
       0,
       sheets.findIndex((sheet) => sheet.sheetType === 'lead_list'),
     )
+
+    reportImportProgress(onProgress, {
+      phase: 'preview',
+      label: '正在生成预览',
+      current: workbookSheets.length,
+      total: workbookSheets.length,
+      percent: 92,
+      detail: '正在汇总统计和默认 sheet',
+    })
+    await yieldToBrowser()
+
+    reportImportProgress(onProgress, {
+      phase: 'completed',
+      label: '解析完成',
+      current: workbookSheets.length,
+      total: workbookSheets.length,
+      percent: 100,
+      detail: `已完成 ${sheets.length} 个 sheet 识别`,
+    })
 
     return {
       fileName: file.name,
@@ -402,6 +487,14 @@ export async function parseLeadFile(file: File): Promise<ImportPreviewResult> {
       selectedSheetIndex,
     }
   } catch (error) {
+    reportImportProgress(onProgress, {
+      phase: 'error',
+      label: '解析失败',
+      current: 0,
+      total: 1,
+      percent: 100,
+      detail: getReadableError(error),
+    })
     return buildErrorResult(file, getReadableError(error))
   }
 }
