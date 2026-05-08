@@ -660,6 +660,7 @@
 
 .toolbar {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   align-items: center;
   margin-bottom: 14px;
@@ -667,7 +668,7 @@
 
 .search-box {
   display: flex;
-  flex: 1;
+  flex: 1 1 320px;
   align-items: center;
   gap: 8px;
   min-height: 40px;
@@ -675,6 +676,34 @@
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #ffffff;
+}
+
+.view-tabs {
+  display: inline-flex;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.view-tabs button {
+  min-height: 34px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.view-tabs button.active {
+  color: #0f766e;
+  background: #ccfbf1;
 }
 
 .search-box svg {
@@ -756,7 +785,7 @@ tbody tr:last-child td {
 }
 
 .lead-pool-table {
-  min-width: 1760px;
+  min-width: 2520px;
 }
 
 .lead-pool-table th,
@@ -823,6 +852,26 @@ tbody tr:last-child td {
   min-width: 120px;
 }
 
+.lead-pool-table th:nth-child(14),
+.lead-pool-table td:nth-child(14),
+.lead-pool-table th:nth-child(15),
+.lead-pool-table td:nth-child(15),
+.lead-pool-table th:nth-child(16),
+.lead-pool-table td:nth-child(16),
+.lead-pool-table th:nth-child(17),
+.lead-pool-table td:nth-child(17),
+.lead-pool-table th:nth-child(18),
+.lead-pool-table td:nth-child(18) {
+  width: 130px;
+  min-width: 130px;
+}
+
+.lead-pool-table th:nth-child(19),
+.lead-pool-table td:nth-child(19) {
+  width: 360px;
+  min-width: 360px;
+}
+
 .lead-company-link,
 .website-link,
 .truncate-cell {
@@ -848,6 +897,36 @@ tbody tr:last-child td {
 
 .lead-pool-stats .metric-card {
   min-height: 116px;
+}
+
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 340px;
+}
+
+.table-action-button {
+  min-height: 28px;
+  padding: 0 8px;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  color: #1d4ed8;
+  background: #eff6ff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.table-action-button:hover {
+  border-color: #60a5fa;
+  background: #dbeafe;
+}
+
+.overdue-text {
+  color: #b91c1c;
+  font-weight: 800;
 }
 
 .table-button {

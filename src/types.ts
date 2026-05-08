@@ -156,6 +156,23 @@ export type LeadImportResult = {
   errors: string[]
 }
 
+export type UserRole = 'admin' | 'manager' | 'sales'
+
+export type UserProfile = {
+  id: string
+  user_id: string
+  full_name: string | null
+  display_name: string | null
+  email: string | null
+  role: UserRole
+  department: string | null
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type LeadClaimStatus = '公海' | '已分配' | '跟进中' | '已成交' | '暂缓' | '无效'
+
 export type LeadPoolRecord = {
   id: string
   company_name: string
@@ -173,6 +190,15 @@ export type LeadPoolRecord = {
   development_level: string | null
   priority_score: number | null
   status: string | null
+  owner_user_id: string | null
+  owner_name: string | null
+  assigned_at: string | null
+  assigned_by: string | null
+  claim_status: LeadClaimStatus | string | null
+  last_activity_at: string | null
+  next_followup_at: string | null
+  last_communication_user_name?: string | null
+  last_communication_at?: string | null
   created_at: string
 }
 
@@ -191,6 +217,10 @@ export type LeadTaskRecord = {
   status: LeadTaskStatus
   priority: LeadTaskPriority
   owner_name: string | null
+  assigned_user_id: string | null
+  assigned_user_name: string | null
+  completed_at: string | null
+  completed_by: string | null
   created_at: string
   updated_at: string
 }
@@ -204,6 +234,48 @@ export type LeadTaskInput = {
   status: LeadTaskStatus
   priority: LeadTaskPriority
   owner_name: string
+  assigned_user_id?: string | null
+  assigned_user_name?: string | null
+}
+
+export type LeadCommunicationInput = {
+  lead_id: string
+  contact_method: string
+  contact_result: string
+  next_action: string
+  next_followup_at: string
+  content: string
+}
+
+export type LeadCommunicationRecord = {
+  id: string
+  lead_id: string
+  user_id: string | null
+  user_name: string | null
+  contact_method: string | null
+  contact_result: string | null
+  next_action: string | null
+  next_followup_at: string | null
+  content: string | null
+  created_at: string
+}
+
+export type DashboardStats = {
+  totalLeads: number
+  publicLeads: number
+  myLeads: number
+  todayTasks: number
+  overdueTasks: number
+  contactedThisWeek: number
+  repliedThisWeek: number
+  quotingLeads: number
+  salesBreakdown: Array<{
+    owner_user_id: string | null
+    owner_name: string
+    leadCount: number
+    pendingTasks: number
+    overdueTasks: number
+  }>
 }
 
 export type LeadSelectOption = {

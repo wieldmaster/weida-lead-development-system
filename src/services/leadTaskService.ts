@@ -13,6 +13,10 @@ type TaskRow = {
   status: string | null
   priority: string | null
   owner_name?: string | null
+  assigned_user_id?: string | null
+  assigned_user_name?: string | null
+  completed_at?: string | null
+  completed_by?: string | null
   created_at: string
   updated_at: string
   leads?: { company_name?: string | null } | Array<{ company_name?: string | null }> | null
@@ -28,7 +32,7 @@ export async function fetchTasks(): Promise<{ tasks: LeadTaskRecord[]; error?: s
     const { data, error } = await client
       .from('lead_tasks')
       .select(
-        'id, lead_id, task_type, task_title, title, task_description, notes, due_date, status, priority, owner_name, created_at, updated_at, leads(company_name)',
+        'id, lead_id, task_type, task_title, title, task_description, notes, due_date, status, priority, owner_name, assigned_user_id, assigned_user_name, completed_at, completed_by, created_at, updated_at, leads(company_name)',
       )
       .order('created_at', { ascending: false })
 
@@ -120,6 +124,7 @@ export async function markTaskInvalid(id: string): Promise<{ error?: string }> {
 }
 
 function buildTaskPayload(input: LeadTaskInput) {
+  const isCompleted = input.status === 'completed'
   return {
     lead_id: input.lead_id || null,
     task_type: input.task_type,
@@ -131,6 +136,11 @@ function buildTaskPayload(input: LeadTaskInput) {
     status: input.status,
     priority: input.priority,
     owner_name: input.owner_name || null,
+    assigned_user_id: input.assigned_user_id || null,
+    assigned_user_name: input.assigned_user_name || input.owner_name || null,
+    assigned_to: input.assigned_user_id || null,
+    completed_at: isCompleted ? new Date().toISOString() : null,
+    completed_by: isCompleted ? input.assigned_user_id || null : null,
   }
 }
 
@@ -147,6 +157,10 @@ function mapTaskRow(row: TaskRow): LeadTaskRecord {
     status: normalizeTaskStatus(row.status),
     priority: normalizePriority(row.priority),
     owner_name: row.owner_name ?? null,
+    assigned_user_id: row.assigned_user_id ?? null,
+    assigned_user_name: row.assigned_user_name ?? row.owner_name ?? null,
+    completed_at: row.completed_at ?? null,
+    completed_by: row.completed_by ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   }

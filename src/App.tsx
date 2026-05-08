@@ -33,7 +33,13 @@ import {
   updateEmailTemplate,
 } from './services/emailTemplateService'
 import { importLeadListSheet } from './services/leadImportService'
-import { fetchLeadPoolRecords } from './services/leadPoolService'
+import {
+  assignLead,
+  claimLead,
+  createLeadCommunication,
+  fetchLeadPoolRecords,
+  releaseLead,
+} from './services/leadPoolService'
 import {
   createTask,
   fetchLeadsForTaskSelect,
@@ -41,12 +47,20 @@ import {
   markTaskInvalid,
   updateTask,
 } from './services/leadTaskService'
+import {
+  canManageTeam,
+  fetchAssignableProfiles,
+  fetchCurrentUserProfile,
+  getProfileDisplayName,
+} from './services/userProfileService'
 import type {
+  DashboardStats,
   EmailTemplateInput,
   EmailTemplateRecord,
   ImportPreviewResult,
   ImportProgress,
   Lead,
+  LeadCommunicationInput,
   LeadImportResult,
   LeadPoolRecord,
   LeadSelectOption,
@@ -58,6 +72,7 @@ import type {
   SheetType,
   StandardLeadField,
   TaskStatus,
+  UserProfile,
 } from './types'
 import {
   applyColumnMappingsToSheet,
@@ -122,8 +137,16 @@ const sheetTypeLabel: Record<SheetType, string> = {
   unknown: '未知',
 }
 
+function getRoleLabel(role?: string): string {
+  if (role === 'admin') return '管理员'
+  if (role === 'manager') return '经理'
+  return '业务员'
+}
+
 function App() {
   const [session, setSession] = useState<Session | null>(null)
+  const [currentProfile, setCurrentProfile] = useState<UserProfile | null>(null)
+  const [profileMessage, setProfileMessage] = useState('')
   const [isCheckingAuth, setIsCheckingAuth] = useState(isSupabaseConfigured)
 
   useEffect(() => {
@@ -149,10 +172,27 @@ function App() {
     }
   }, [])
 
+  useEffect(() => {
+    if (!session?.user) {
+      return
+    }
+
+    let mounted = true
+    void fetchCurrentUserProfile(session.user).then((result) => {
+      if (!mounted) return
+      setCurrentProfile(result.profile)
+      setProfileMessage(result.error ?? '')
+    })
+    return () => {
+      mounted = false
+    }
+  }, [session])
+
   async function handleSignOut() {
     if (!supabase) return
     await supabase.auth.signOut()
     setSession(null)
+    setCurrentProfile(null)
   }
 
   if (!isSupabaseConfigured) {
@@ -210,7 +250,9 @@ function App() {
 
         <div className="side-note">
           <span>当前账号</span>
+          <p>{getProfileDisplayName(currentProfile, session.user.email)}</p>
           <p>{session.user.email}</p>
+          <p>{getRoleLabel(currentProfile?.role)}</p>
           <button className="ghost-button sign-out-button" onClick={() => void handleSignOut()}>
             <LogOut size={15} aria-hidden="true" />
             退出登录
@@ -219,12 +261,13 @@ function App() {
       </aside>
 
       <main className="content">
+        {profileMessage ? <p className="warning-box">{profileMessage}</p> : null}
         <Routes>
-          <Route path="/" element={<DashboardPage />} />
+          <Route path="/" element={<DashboardPage currentProfile={currentProfile} />} />
           <Route path="/import" element={<LeadImportPage />} />
-          <Route path="/leads" element={<LeadPoolPage />} />
+          <Route path="/leads" element={<LeadPoolPage currentProfile={currentProfile} />} />
           <Route path="/leads/:leadId" element={<LeadDetailPage />} />
-          <Route path="/tasks" element={<TasksPage />} />
+          <Route path="/tasks" element={<TasksPage currentProfile={currentProfile} />} />
           <Route path="/templates" element={<TemplatesPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
@@ -404,24 +447,50 @@ function PageHeader({
   )
 }
 
-function DashboardPage() {
-  const activeTasks = tasks.filter((task) => task.status !== 'completed').length
-  const highPriority = leads.filter((lead) => lead.tier === 'A').length
-  const pendingImports = importBatches.filter((batch) => batch.status !== 'completed').length
+function DashboardPage({ currentProfile }: { currentProfile: UserProfile | null }) {
+  const [dashboardRecords, setDashboardRecords] = useState<LeadPoolRecord[]>([])
+  const [dashboardTasks, setDashboardTasks] = useState<LeadTaskRecord[]>([])
+  const [dashboardMessage, setDashboardMessage] = useState('')
+  const isTeamView = canManageTeam(currentProfile)
+
+  useEffect(() => {
+    let mounted = true
+    async function loadDashboard() {
+      const [leadResult, taskResult] = await Promise.all([
+        fetchLeadPoolRecords({ profile: currentProfile, view: isTeamView ? 'team' : 'mine' }),
+        fetchTasks(),
+      ])
+      if (!mounted) return
+      setDashboardRecords(leadResult.usedMock ? mockLeadPoolRecords() : leadResult.records)
+      setDashboardTasks(taskResult.tasks)
+      setDashboardMessage(leadResult.error ?? taskResult.error ?? '')
+    }
+    void loadDashboard()
+    return () => {
+      mounted = false
+    }
+  }, [currentProfile, isTeamView])
+
+  const stats = useMemo(
+    () => buildDashboardStats(dashboardRecords, dashboardTasks, currentProfile),
+    [currentProfile, dashboardRecords, dashboardTasks],
+  )
 
   return (
     <section>
       <PageHeader
         title="工作台"
-        description="查看客户开发进度、待处理任务和近期导入情况。"
+        description={isTeamView ? '查看团队客户归属、待跟进和业务员开发负荷。' : '查看我的客户、今日待跟进和逾期任务。'}
         action={<button className="primary-button">新建导入批次</button>}
       />
 
+      {dashboardMessage ? <p className="warning-box">{dashboardMessage}</p> : null}
+
       <div className="metric-grid">
-        <MetricCard title="客户总数" value={leads.length} detail="当前开发池样例客户" icon={UsersRound} />
-        <MetricCard title="A级客户" value={highPriority} detail="优先跟进对象" icon={BarChart3} />
-        <MetricCard title="待办任务" value={activeTasks} detail="未完成开发动作" icon={ClipboardList} />
-        <MetricCard title="导入处理中" value={pendingImports} detail="等待识别或确认" icon={FileSpreadsheet} />
+        <MetricCard title={isTeamView ? '全部客户数' : '我的客户数'} value={isTeamView ? stats.totalLeads : stats.myLeads} detail="当前可见客户" icon={UsersRound} />
+        <MetricCard title={isTeamView ? '公海客户数' : '今日待跟进'} value={isTeamView ? stats.publicLeads : stats.todayTasks} detail={isTeamView ? '未分配客户' : '今天需要处理'} icon={BarChart3} />
+        <MetricCard title="逾期任务" value={stats.overdueTasks} detail="超过截止日期未完成" icon={ClipboardList} />
+        <MetricCard title={isTeamView ? '报价中客户' : '本周已联系'} value={isTeamView ? stats.quotingLeads : stats.contactedThisWeek} detail={isTeamView ? '销售机会推进中' : '本周沟通记录'} icon={Mail} />
       </div>
 
       <div className="two-column">
@@ -448,24 +517,112 @@ function DashboardPage() {
 
         <section className="panel">
           <div className="section-title">
-            <h2>今日建议动作</h2>
+            <h2>{isTeamView ? '业务员客户分布' : '今日建议动作'}</h2>
             <NavLink to="/tasks">查看任务</NavLink>
           </div>
-          <div className="timeline-list">
-            {tasks.slice(0, 4).map((task) => (
-              <div className="timeline-item" key={task.id}>
-                <span className="timeline-dot" />
-                <div>
-                  <strong>{task.title}</strong>
-                  <p>{task.leadName} · 截止 {task.dueDate}</p>
+          {isTeamView ? (
+            <DataTable
+              columns={['业务员', '客户数', '待跟进', '逾期']}
+              rows={stats.salesBreakdown.map((item) => [
+                item.owner_name,
+                item.leadCount,
+                item.pendingTasks,
+                item.overdueTasks,
+              ])}
+            />
+          ) : (
+            <div className="timeline-list">
+              {dashboardTasks.slice(0, 4).map((task) => (
+                <div className="timeline-item" key={task.id}>
+                  <span className="timeline-dot" />
+                  <div>
+                    <strong>{task.task_title}</strong>
+                    <p>{task.lead_company_name} · 截止 {task.due_date || '-'}</p>
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </section>
       </div>
     </section>
   )
+}
+
+function buildDashboardStats(
+  records: LeadPoolRecord[],
+  taskRecords: LeadTaskRecord[],
+  profile: UserProfile | null,
+): DashboardStats {
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const tomorrow = new Date(today)
+  tomorrow.setDate(today.getDate() + 1)
+  const weekStart = new Date(today)
+  weekStart.setDate(today.getDate() - today.getDay() + 1)
+  const userId = profile?.user_id
+  const myRecords = userId ? records.filter((record) => record.owner_user_id === userId) : records
+  const myTasks = userId
+    ? taskRecords.filter((task) => task.assigned_user_id === userId || records.some((record) => record.id === task.lead_id && record.owner_user_id === userId))
+    : taskRecords
+
+  const isDueToday = (value: string | null) => {
+    if (!value) return false
+    const date = new Date(value)
+    return date >= today && date < tomorrow
+  }
+  const isOverdue = (value: string | null) => {
+    if (!value) return false
+    const date = new Date(value)
+    return date < today
+  }
+  const isThisWeek = (value: string | null) => {
+    if (!value) return false
+    return new Date(value) >= weekStart
+  }
+
+  const salesMap = new Map<string, DashboardStats['salesBreakdown'][number]>()
+  records.forEach((record) => {
+    const key = record.owner_user_id || 'public'
+    const current = salesMap.get(key) ?? {
+      owner_user_id: record.owner_user_id,
+      owner_name: record.owner_name || '公海',
+      leadCount: 0,
+      pendingTasks: 0,
+      overdueTasks: 0,
+    }
+    current.leadCount += 1
+    salesMap.set(key, current)
+  })
+  taskRecords.forEach((task) => {
+    const key = task.assigned_user_id || 'unassigned'
+    const current = salesMap.get(key) ?? {
+      owner_user_id: task.assigned_user_id,
+      owner_name: task.assigned_user_name || task.owner_name || '未分配',
+      leadCount: 0,
+      pendingTasks: 0,
+      overdueTasks: 0,
+    }
+    if (task.status !== 'completed' && task.status !== 'invalid') {
+      current.pendingTasks += 1
+    }
+    if (task.status !== 'completed' && task.status !== 'invalid' && isOverdue(task.due_date)) {
+      current.overdueTasks += 1
+    }
+    salesMap.set(key, current)
+  })
+
+  return {
+    totalLeads: records.length,
+    publicLeads: records.filter((record) => !record.owner_user_id || record.claim_status === '公海').length,
+    myLeads: myRecords.length,
+    todayTasks: myTasks.filter((task) => task.status !== 'completed' && isDueToday(task.due_date)).length,
+    overdueTasks: myTasks.filter((task) => task.status !== 'completed' && task.status !== 'invalid' && isOverdue(task.due_date)).length,
+    contactedThisWeek: myRecords.filter((record) => isThisWeek(record.last_activity_at)).length,
+    repliedThisWeek: myRecords.filter((record) => normalizeLeadStatus(record.status) === '已回复' && isThisWeek(record.last_activity_at)).length,
+    quotingLeads: records.filter((record) => normalizeLeadStatus(record.status) === '报价中').length,
+    salesBreakdown: Array.from(salesMap.values()).sort((a, b) => b.leadCount - a.leadCount),
+  }
 }
 
 function MetricCard({
@@ -1088,6 +1245,15 @@ function mockLeadPoolRecords(): LeadPoolRecord[] {
     development_level: lead.tier,
     priority_score: lead.tier === 'A' ? 80 : lead.tier === 'B' ? 60 : 40,
     status: statusLabel[lead.status],
+    owner_user_id: null,
+    owner_name: null,
+    assigned_at: null,
+    assigned_by: null,
+    claim_status: '公海',
+    last_activity_at: null,
+    next_followup_at: lead.nextFollowUp,
+    last_communication_user_name: null,
+    last_communication_at: null,
     created_at: new Date().toISOString(),
   }))
 }
@@ -1098,6 +1264,35 @@ function formatDate(value: string) {
     return value
   }
   return date.toLocaleDateString('zh-CN')
+}
+
+function formatNullableDate(value: string | null | undefined): string {
+  return value ? formatDate(value) : '-'
+}
+
+function isSameDay(value: string | null | undefined, target: Date): boolean {
+  if (!value) return false
+  const date = new Date(value)
+  return date.getFullYear() === target.getFullYear()
+    && date.getMonth() === target.getMonth()
+    && date.getDate() === target.getDate()
+}
+
+function isPastDate(value: string | null | undefined): boolean {
+  if (!value) return false
+  const date = new Date(value)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  return date < today
+}
+
+function isThisWeekDate(value: string | null | undefined): boolean {
+  if (!value) return false
+  const today = new Date()
+  const weekStart = new Date(today)
+  weekStart.setHours(0, 0, 0, 0)
+  weekStart.setDate(today.getDate() - today.getDay() + 1)
+  return new Date(value) >= weekStart
 }
 
 function getWebsiteHref(value: string | null): string {
@@ -1154,37 +1349,166 @@ function getLeadStatusClass(value: string): string {
   return 'status-pending'
 }
 
-function LeadPoolPage() {
+function LeadPoolPage({ currentProfile }: { currentProfile: UserProfile | null }) {
   const [records, setRecords] = useState<LeadPoolRecord[]>([])
+  const [assignableProfiles, setAssignableProfiles] = useState<UserProfile[]>([])
   const [poolMessage, setPoolMessage] = useState('')
   const [usedMock, setUsedMock] = useState(false)
   const [searchKeyword, setSearchKeyword] = useState('')
   const [levelFilter, setLevelFilter] = useState('全部层级')
   const [sourceFilter, setSourceFilter] = useState('全部来源')
+  const [ownerFilter, setOwnerFilter] = useState('全部负责人')
+  const [claimFilter, setClaimFilter] = useState('全部归属')
+  const [statusFilter, setStatusFilter] = useState('全部状态')
+  const [activityFilter, setActivityFilter] = useState('全部最近跟进')
+  const [followupFilter, setFollowupFilter] = useState('全部跟进')
+  const [viewMode, setViewMode] = useState<'mine' | 'public' | 'team'>('mine')
+  const [selectedLead, setSelectedLead] = useState<LeadPoolRecord | null>(null)
+  const [assignTargetUserId, setAssignTargetUserId] = useState('')
+  const [communicationDraft, setCommunicationDraft] = useState<LeadCommunicationInput>(createEmptyCommunicationInput(''))
+  const [modalMode, setModalMode] = useState<'assign' | 'communication' | null>(null)
+  const canManage = canManageTeam(currentProfile)
+  const activeViewMode = !canManage && viewMode === 'team' ? 'mine' : viewMode
 
   useEffect(() => {
     let mounted = true
-    void fetchLeadPoolRecords().then((result) => {
+    async function loadLeadPool() {
+      const [leadResult, profileResult] = await Promise.all([
+        fetchLeadPoolRecords({ profile: currentProfile, view: activeViewMode }),
+        fetchAssignableProfiles(),
+      ])
       if (!mounted) {
         return
       }
-      if (result.usedMock) {
+      setAssignableProfiles(profileResult.profiles)
+      if (leadResult.usedMock) {
         setRecords(mockLeadPoolRecords())
         setUsedMock(true)
-        setPoolMessage(result.error ?? '当前使用示例客户数据。')
+        setPoolMessage(leadResult.error ?? profileResult.error ?? '当前使用示例客户数据。')
       } else {
-        setRecords(result.records)
+        setRecords(leadResult.records)
         setUsedMock(false)
-        setPoolMessage(result.records.length === 0 ? 'Supabase 已连接，但客户池暂无数据。' : '')
+        setPoolMessage(leadResult.records.length === 0 ? 'Supabase 已连接，但当前视图暂无客户。' : profileResult.error ?? '')
       }
-    })
+    }
+    void loadLeadPool()
     return () => {
       mounted = false
     }
-  }, [])
+  }, [activeViewMode, currentProfile])
+
+  function updateRecordInState(nextRecord: LeadPoolRecord) {
+    setRecords((current) => current.map((record) => (record.id === nextRecord.id ? { ...record, ...nextRecord } : record)))
+  }
+
+  async function handleClaimLead(lead: LeadPoolRecord) {
+    if (!currentProfile) {
+      setPoolMessage('请先登录并加载用户资料。')
+      return
+    }
+    const result = await claimLead(lead, currentProfile)
+    if (result.error || !result.record) {
+      setPoolMessage(result.error ?? '领取客户失败')
+      return
+    }
+    updateRecordInState(result.record)
+    setPoolMessage('客户已领取到我的客户。')
+  }
+
+  function openAssignLead(lead: LeadPoolRecord) {
+    setSelectedLead(lead)
+    setAssignTargetUserId(lead.owner_user_id || assignableProfiles[0]?.user_id || '')
+    setModalMode('assign')
+  }
+
+  async function handleAssignLead() {
+    if (!selectedLead || !currentProfile) return
+    const targetProfile = assignableProfiles.find((profile) => profile.user_id === assignTargetUserId)
+    if (!targetProfile) {
+      setPoolMessage('请选择要分配的业务员。')
+      return
+    }
+    const result = await assignLead(selectedLead.id, targetProfile, currentProfile)
+    if (result.error || !result.record) {
+      setPoolMessage(result.error ?? '分配客户失败')
+      return
+    }
+    updateRecordInState(result.record)
+    setPoolMessage('客户负责人已更新。')
+    setModalMode(null)
+    setSelectedLead(null)
+  }
+
+  async function handleReleaseLead(lead: LeadPoolRecord) {
+    if (!currentProfile) {
+      setPoolMessage('请先登录并加载用户资料。')
+      return
+    }
+    const ok = window.confirm(`确认将 ${lead.company_name} 释放到公海吗？`)
+    if (!ok) return
+    const result = await releaseLead(lead, currentProfile)
+    if (result.error || !result.record) {
+      setPoolMessage(result.error ?? '释放客户失败')
+      return
+    }
+    updateRecordInState(result.record)
+    setPoolMessage('客户已释放到公海。')
+  }
+
+  function openCommunicationModal(lead: LeadPoolRecord) {
+    setSelectedLead(lead)
+    setCommunicationDraft(createEmptyCommunicationInput(lead.id))
+    setModalMode('communication')
+  }
+
+  async function handleSaveCommunication() {
+    if (!currentProfile || !selectedLead) return
+    if (!communicationDraft.contact_result.trim() && !communicationDraft.content.trim()) {
+      setPoolMessage('请填写沟通结果或沟通内容。')
+      return
+    }
+    const result = await createLeadCommunication(communicationDraft, currentProfile)
+    if (result.error) {
+      setPoolMessage(result.error)
+      return
+    }
+    const now = new Date().toISOString()
+    updateRecordInState({
+      ...selectedLead,
+      claim_status: communicationDraft.contact_result === '已成交' ? '已成交' : '跟进中',
+      last_activity_at: now,
+      next_followup_at: communicationDraft.next_followup_at || null,
+      last_communication_user_name: getProfileDisplayName(currentProfile),
+      last_communication_at: now,
+    })
+    setPoolMessage('沟通记录已保存。')
+    setModalMode(null)
+    setSelectedLead(null)
+  }
+
+  async function handleCreateTaskForLead(lead: LeadPoolRecord) {
+    if (!currentProfile) {
+      setPoolMessage('请先登录并加载用户资料。')
+      return
+    }
+    const result = await createTask({
+      ...createEmptyTaskInput(lead.id),
+      task_title: `首轮开发 - ${lead.company_name}`,
+      task_description: '从客户开发池创建的跟进任务。',
+      due_date: new Date().toISOString().slice(0, 10),
+      owner_name: getProfileDisplayName(currentProfile),
+      assigned_user_id: currentProfile.user_id,
+      assigned_user_name: getProfileDisplayName(currentProfile),
+    })
+    setPoolMessage(result.error ?? '已创建跟进任务。')
+  }
 
   const sourceOptions = useMemo(
     () => ['全部来源', ...Array.from(new Set(records.map((record) => record.source_type).filter(Boolean) as string[]))],
+    [records],
+  )
+  const ownerOptions = useMemo(
+    () => ['全部负责人', ...Array.from(new Set(records.map((record) => record.owner_name || '公海')))],
     [records],
   )
   const filteredRecords = records.filter((record) => {
@@ -1203,20 +1527,32 @@ function LeadPoolPage() {
         .some((value) => String(value).toLowerCase().includes(keyword))
     const matchesLevel = levelFilter === '全部层级' || record.development_level === levelFilter
     const matchesSource = sourceFilter === '全部来源' || record.source_type === sourceFilter
-    return matchesKeyword && matchesLevel && matchesSource
+    const matchesOwner = ownerFilter === '全部负责人' || (record.owner_name || '公海') === ownerFilter
+    const matchesClaim = claimFilter === '全部归属' || (record.claim_status || '公海') === claimFilter
+    const leadStatus = normalizeLeadStatus(record.status)
+    const matchesStatus = statusFilter === '全部状态' || leadStatus === statusFilter
+    const matchesActivity = activityFilter === '全部最近跟进'
+      || (activityFilter === '本周已跟进' && isThisWeekDate(record.last_activity_at))
+      || (activityFilter === '从未跟进' && !record.last_activity_at)
+    const matchesFollowup = followupFilter === '全部跟进'
+      || (followupFilter === '今日跟进' && isSameDay(record.next_followup_at, new Date()))
+      || (followupFilter === '逾期' && isPastDate(record.next_followup_at))
+      || (followupFilter === '无下次跟进' && !record.next_followup_at)
+    return matchesKeyword && matchesLevel && matchesSource && matchesOwner && matchesClaim && matchesStatus && matchesActivity && matchesFollowup
   })
   const poolStats = {
     total: records.length,
     email: records.filter((record) => Boolean(record.email?.trim())).length,
     phone: records.filter((record) => Boolean(record.phone?.trim() || record.whatsapp?.trim())).length,
     website: records.filter((record) => Boolean(getWebsiteHref(record.website))).length,
+    public: records.filter((record) => !record.owner_user_id || record.claim_status === '公海').length,
   }
 
   return (
     <section>
       <PageHeader
         title="客户开发池"
-        description="集中管理已导入客户，支持按层级、来源和关键词筛选。"
+        description="按我的客户、公海客户和团队客户管理客户归属，支持领取、分配、释放和沟通记录。"
         action={<button className="primary-button">新增客户</button>}
       />
 
@@ -1226,7 +1562,21 @@ function LeadPoolPage() {
         <MetricCard title="客户总数" value={poolStats.total} detail="当前客户池记录" icon={UsersRound} />
         <MetricCard title="有邮箱客户数" value={poolStats.email} detail="可优先开发信触达" icon={Mail} />
         <MetricCard title="有电话客户数" value={poolStats.phone} detail="可电话或 WhatsApp 跟进" icon={ClipboardList} />
-        <MetricCard title="有网站客户数" value={poolStats.website} detail="可查看官网背景" icon={Database} />
+        <MetricCard title="公海客户数" value={poolStats.public} detail="可领取或分配" icon={Database} />
+      </div>
+
+      <div className="view-tabs" role="tablist" aria-label="客户池视图">
+        <button className={activeViewMode === 'mine' ? 'active' : ''} type="button" onClick={() => setViewMode('mine')}>
+          我的客户
+        </button>
+        <button className={activeViewMode === 'public' ? 'active' : ''} type="button" onClick={() => setViewMode('public')}>
+          公海客户
+        </button>
+        {canManage ? (
+          <button className={activeViewMode === 'team' ? 'active' : ''} type="button" onClick={() => setViewMode('team')}>
+            团队客户
+          </button>
+        ) : null}
       </div>
 
       <div className="toolbar">
@@ -1253,16 +1603,53 @@ function LeadPoolPage() {
             <option key={source}>{source}</option>
           ))}
         </select>
+        <select aria-label="负责人筛选" value={ownerFilter} onChange={(event) => setOwnerFilter(event.target.value)}>
+          {ownerOptions.map((owner) => (
+            <option key={owner}>{owner}</option>
+          ))}
+        </select>
+        <select aria-label="归属状态" value={claimFilter} onChange={(event) => setClaimFilter(event.target.value)}>
+          <option>全部归属</option>
+          <option>公海</option>
+          <option>已分配</option>
+          <option>跟进中</option>
+          <option>已成交</option>
+          <option>暂缓</option>
+          <option>无效</option>
+        </select>
+        <select aria-label="开发状态" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+          <option>全部状态</option>
+          <option>待开发</option>
+          <option>已联系</option>
+          <option>已回复</option>
+          <option>报价中</option>
+          <option>暂缓</option>
+          <option>无效</option>
+        </select>
+        <select aria-label="最近跟进时间" value={activityFilter} onChange={(event) => setActivityFilter(event.target.value)}>
+          <option>全部最近跟进</option>
+          <option>本周已跟进</option>
+          <option>从未跟进</option>
+        </select>
+        <select aria-label="跟进时间" value={followupFilter} onChange={(event) => setFollowupFilter(event.target.value)}>
+          <option>全部跟进</option>
+          <option>今日跟进</option>
+          <option>逾期</option>
+          <option>无下次跟进</option>
+        </select>
       </div>
 
       <section className="panel lead-pool-panel">
         <DataTable
           className="lead-pool-table"
-          columns={['公司名称', '国家', '区域', '联系人', '邮箱', '电话', '网站', '产品/主营/采购需求', '开发层级', '优先分', '状态', '来源', '创建时间']}
+          columns={['公司名称', '国家', '区域', '联系人', '邮箱', '电话', '网站', '产品/主营/采购需求', '开发层级', '优先分', '状态', '来源', '负责人', '归属状态', '最近跟进', '下次跟进', '最后沟通人', '创建时间', '操作']}
           rows={filteredRecords.map((lead) => {
             const websiteHref = getWebsiteHref(lead.website)
             const leadStatus = normalizeLeadStatus(lead.status)
             const level = lead.development_level?.trim() || 'C'
+            const isPublic = !lead.owner_user_id || lead.claim_status === '公海'
+            const canClaim = isPublic || canManage
+            const canRelease = canManage || lead.owner_user_id === currentProfile?.user_id
             return [
               <NavLink to={`/leads/${lead.id}`} className="table-link lead-company-link" key={lead.id} title={lead.company_name}>
                 {lead.company_name}
@@ -1286,11 +1673,135 @@ function LeadPoolPage() {
               lead.priority_score ?? 0,
               <span className={`lead-tag ${getLeadStatusClass(leadStatus)}`}>{leadStatus}</span>,
               lead.source_type ?? lead.source_detail ?? '-',
+              lead.owner_name || '公海',
+              <span className={`lead-tag ${lead.claim_status === '公海' ? 'status-paused' : 'status-replied'}`}>
+                {lead.claim_status || '公海'}
+              </span>,
+              formatNullableDate(lead.last_activity_at),
+              <span className={isPastDate(lead.next_followup_at) ? 'overdue-text' : undefined}>
+                {formatNullableDate(lead.next_followup_at)}
+              </span>,
+              lead.last_communication_user_name || '-',
               formatDate(lead.created_at),
+              <div className="row-actions">
+                {canClaim ? (
+                  <button className="table-action-button" type="button" onClick={() => void handleClaimLead(lead)}>
+                    领取客户
+                  </button>
+                ) : null}
+                {canManage ? (
+                  <button className="table-action-button" type="button" onClick={() => openAssignLead(lead)}>
+                    {lead.owner_user_id ? '转移负责人' : '分配客户'}
+                  </button>
+                ) : null}
+                {canRelease ? (
+                  <button className="table-action-button" type="button" onClick={() => void handleReleaseLead(lead)}>
+                    释放公海
+                  </button>
+                ) : null}
+                <button className="table-action-button" type="button" onClick={() => void handleCreateTaskForLead(lead)}>
+                  创建任务
+                </button>
+                <button className="table-action-button" type="button" onClick={() => openCommunicationModal(lead)}>
+                  添加沟通
+                </button>
+              </div>,
             ]
           })}
         />
       </section>
+
+      {modalMode === 'assign' && selectedLead ? (
+        <Modal title="分配 / 转移负责人" onClose={() => setModalMode(null)}>
+          <div className="form-grid">
+            <label>
+              <span>客户</span>
+              <input value={selectedLead.company_name} readOnly />
+            </label>
+            <label>
+              <span>选择业务员</span>
+              <select value={assignTargetUserId} onChange={(event) => setAssignTargetUserId(event.target.value)}>
+                <option value="">请选择业务员</option>
+                {assignableProfiles.map((profile) => (
+                  <option key={profile.user_id} value={profile.user_id}>
+                    {getProfileDisplayName(profile)} · {profile.email}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="modal-actions">
+            <button className="ghost-button" onClick={() => setModalMode(null)}>关闭</button>
+            <button className="primary-button" onClick={() => void handleAssignLead()}>确认分配</button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {modalMode === 'communication' && selectedLead ? (
+        <Modal title="添加沟通记录" onClose={() => setModalMode(null)}>
+          <div className="form-grid">
+            <label>
+              <span>客户</span>
+              <input value={selectedLead.company_name} readOnly />
+            </label>
+            <label>
+              <span>沟通方式</span>
+              <select
+                value={communicationDraft.contact_method}
+                onChange={(event) => setCommunicationDraft((current) => ({ ...current, contact_method: event.target.value }))}
+              >
+                <option>邮件</option>
+                <option>电话</option>
+                <option>WhatsApp</option>
+                <option>会议</option>
+                <option>其他</option>
+              </select>
+            </label>
+            <label>
+              <span>沟通结果</span>
+              <select
+                value={communicationDraft.contact_result}
+                onChange={(event) => setCommunicationDraft((current) => ({ ...current, contact_result: event.target.value }))}
+              >
+                <option>已联系</option>
+                <option>已回复</option>
+                <option>报价中</option>
+                <option>暂缓</option>
+                <option>无效</option>
+                <option>已成交</option>
+              </select>
+            </label>
+            <label>
+              <span>下次跟进时间</span>
+              <input
+                type="date"
+                value={communicationDraft.next_followup_at}
+                onChange={(event) => setCommunicationDraft((current) => ({ ...current, next_followup_at: event.target.value }))}
+              />
+            </label>
+            <label className="full-span">
+              <span>下一步动作</span>
+              <input
+                value={communicationDraft.next_action}
+                onChange={(event) => setCommunicationDraft((current) => ({ ...current, next_action: event.target.value }))}
+                placeholder="例如：3天后发送产品选品"
+              />
+            </label>
+            <label className="full-span">
+              <span>沟通内容</span>
+              <textarea
+                value={communicationDraft.content}
+                onChange={(event) => setCommunicationDraft((current) => ({ ...current, content: event.target.value }))}
+                rows={5}
+              />
+            </label>
+          </div>
+          <div className="modal-actions">
+            <button className="ghost-button" onClick={() => setModalMode(null)}>关闭</button>
+            <button className="primary-button" onClick={() => void handleSaveCommunication()}>保存沟通记录</button>
+          </div>
+        </Modal>
+      ) : null}
     </section>
   )
 }
@@ -1373,6 +1884,19 @@ function createEmptyTaskInput(leadId: string | null = null): LeadTaskInput {
     status: 'pending',
     priority: 'medium',
     owner_name: 'Elan',
+    assigned_user_id: null,
+    assigned_user_name: null,
+  }
+}
+
+function createEmptyCommunicationInput(leadId: string): LeadCommunicationInput {
+  return {
+    lead_id: leadId,
+    contact_method: '邮件',
+    contact_result: '已联系',
+    next_action: '',
+    next_followup_at: '',
+    content: '',
   }
 }
 
@@ -1398,6 +1922,8 @@ function taskToInput(task: LeadTaskRecord): LeadTaskInput {
     status: task.status,
     priority: task.priority,
     owner_name: task.owner_name ?? '',
+    assigned_user_id: task.assigned_user_id,
+    assigned_user_name: task.assigned_user_name,
   }
 }
 
@@ -1461,7 +1987,7 @@ function getEmailTemplateStageLabel(value: string): string {
   return emailTemplateStageLabels[value] ?? (value || '未设置阶段')
 }
 
-function TasksPage() {
+function TasksPage({ currentProfile }: { currentProfile: UserProfile | null }) {
   const [taskRecords, setTaskRecords] = useState<LeadTaskRecord[]>([])
   const [leadOptions, setLeadOptions] = useState<LeadSelectOption[]>([])
   const [message, setMessage] = useState('')
@@ -1494,7 +2020,12 @@ function TasksPage() {
   )
   function openNewTask() {
     setSelectedTask(null)
-    setDraftTask(createEmptyTaskInput())
+    setDraftTask({
+      ...createEmptyTaskInput(),
+      owner_name: getProfileDisplayName(currentProfile),
+      assigned_user_id: currentProfile?.user_id ?? null,
+      assigned_user_name: getProfileDisplayName(currentProfile),
+    })
     setLeadSearch('')
     setIsTaskModalOpen(true)
     setMessage('')
@@ -1522,7 +2053,13 @@ function TasksPage() {
       return
     }
     setIsSaving(true)
-    const result = selectedTask ? await updateTask(selectedTask.id, draftTask) : await createTask(draftTask)
+    const taskPayload: LeadTaskInput = {
+      ...draftTask,
+      owner_name: draftTask.owner_name || getProfileDisplayName(currentProfile),
+      assigned_user_id: draftTask.assigned_user_id || currentProfile?.user_id || null,
+      assigned_user_name: draftTask.assigned_user_name || getProfileDisplayName(currentProfile),
+    }
+    const result = selectedTask ? await updateTask(selectedTask.id, taskPayload) : await createTask(taskPayload)
     setIsSaving(false)
     if (result.error || !result.task) {
       setMessage(result.error ?? '保存任务失败')
@@ -1532,6 +2069,7 @@ function TasksPage() {
     setMessage('任务已保存。')
     setSelectedTask(null)
     setDraftTask(createEmptyTaskInput())
+    setIsTaskModalOpen(false)
   }
 
   async function handleMarkTaskInvalid() {
@@ -1590,6 +2128,10 @@ function TasksPage() {
                       <div>
                         <dt>截止</dt>
                         <dd>{task.due_date || '-'}</dd>
+                      </div>
+                      <div>
+                        <dt>负责人</dt>
+                        <dd>{task.assigned_user_name || task.owner_name || '-'}</dd>
                       </div>
                     </dl>
                     <span className={`lead-tag ${getLeadStatusClass(leadTaskStatusLabels[task.status])}`}>
@@ -1668,10 +2210,7 @@ function TasksPage() {
             </label>
             <label>
               <span>负责人</span>
-              <input
-                value={draftTask.owner_name}
-                onChange={(event) => setDraftTask((current) => ({ ...current, owner_name: event.target.value }))}
-              />
+              <input value={draftTask.assigned_user_name || draftTask.owner_name} readOnly />
             </label>
             <label className="full-span">
               <span>任务描述</span>
