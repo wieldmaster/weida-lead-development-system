@@ -3,6 +3,13 @@ import { getSupabaseClient, isSupabaseConfigured } from '../lib/supabase'
 import type { UserProfile, UserRole } from '../types'
 
 type UserProfileRow = Omit<UserProfile, 'role'> & { role: string | null }
+export type UserProfileUpdateInput = {
+  full_name?: string | null
+  display_name?: string | null
+  role?: UserRole
+  department?: string | null
+  is_active?: boolean
+}
 
 export function getProfileDisplayName(profile: UserProfile | null, fallbackEmail?: string | null): string {
   return profile?.display_name || profile?.full_name || profile?.email || fallbackEmail || '未命名用户'
@@ -79,6 +86,75 @@ export async function fetchAssignableProfiles(): Promise<{ profiles: UserProfile
     return { profiles: ((data as UserProfileRow[] | null) ?? []).map(mapProfileRow) }
   } catch (error) {
     return { profiles: [], error: error instanceof Error ? formatProfileError(error.message) : '读取业务员列表失败' }
+  }
+}
+
+export async function fetchUserProfiles(): Promise<{ profiles: UserProfile[]; error?: string }> {
+  if (!isSupabaseConfigured) {
+    return { profiles: [], error: '请先配置 Supabase 环境变量' }
+  }
+
+  try {
+    const client = getSupabaseClient()
+    const { data, error } = await client
+      .from('user_profiles')
+      .select('id, user_id, full_name, display_name, email, role, department, is_active, created_at, updated_at')
+      .order('created_at', { ascending: false })
+
+    if (error) {
+      return { profiles: [], error: formatProfileError(error.message) }
+    }
+
+    return { profiles: ((data as UserProfileRow[] | null) ?? []).map(mapProfileRow) }
+  } catch (error) {
+    return { profiles: [], error: error instanceof Error ? formatProfileError(error.message) : '读取业务员列表失败' }
+  }
+}
+
+export async function updateUserProfile(
+  profileId: string,
+  input: UserProfileUpdateInput,
+): Promise<{ profile?: UserProfile; error?: string }> {
+  if (!isSupabaseConfigured) {
+    return { error: '请先配置 Supabase 环境变量' }
+  }
+
+  try {
+    const client = getSupabaseClient()
+    const payload: UserProfileUpdateInput = {}
+    if ('full_name' in input) payload.full_name = input.full_name ?? null
+    if ('display_name' in input) payload.display_name = input.display_name ?? null
+    if ('role' in input) payload.role = input.role
+    if ('department' in input) payload.department = input.department ?? null
+    if ('is_active' in input) payload.is_active = input.is_active
+    const { data, error } = await client
+      .from('user_profiles')
+      .update(payload)
+      .eq('id', profileId)
+      .select('id, user_id, full_name, display_name, email, role, department, is_active, created_at, updated_at')
+      .single()
+
+    if (error || !data) {
+      return { error: formatProfileError(error?.message ?? '更新业务员资料失败') }
+    }
+
+    return { profile: mapProfileRow(data as UserProfileRow) }
+  } catch (error) {
+    return { error: error instanceof Error ? formatProfileError(error.message) : '更新业务员资料失败' }
+  }
+}
+
+export async function deleteUserProfile(profileId: string): Promise<{ error?: string }> {
+  if (!isSupabaseConfigured) {
+    return { error: '请先配置 Supabase 环境变量' }
+  }
+
+  try {
+    const client = getSupabaseClient()
+    const { error } = await client.from('user_profiles').delete().eq('id', profileId)
+    return error ? { error: formatProfileError(error.message) } : {}
+  } catch (error) {
+    return { error: error instanceof Error ? formatProfileError(error.message) : '删除业务员资料失败' }
   }
 }
 

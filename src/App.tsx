@@ -49,9 +49,12 @@ import {
 } from './services/leadTaskService'
 import {
   canManageTeam,
+  deleteUserProfile,
   fetchAssignableProfiles,
   fetchCurrentUserProfile,
+  fetchUserProfiles,
   getProfileDisplayName,
+  updateUserProfile,
 } from './services/userProfileService'
 import type {
   DashboardStats,
@@ -73,6 +76,7 @@ import type {
   StandardLeadField,
   TaskStatus,
   UserProfile,
+  UserRole,
 } from './types'
 import {
   applyColumnMappingsToSheet,
@@ -91,6 +95,15 @@ const navItems = [
   { to: '/templates', label: '邮件模板', icon: Mail },
   { to: '/settings', label: '数据设置', icon: Settings },
 ]
+
+const rememberedEmailStorageKey = 'weida-lead-development-remembered-email'
+
+function getRememberedEmail(): string {
+  if (typeof window === 'undefined') {
+    return ''
+  }
+  return window.localStorage.getItem(rememberedEmailStorageKey) ?? ''
+}
 
 const statusLabel: Record<LeadStatus, string> = {
   new: '新线索',
@@ -300,9 +313,10 @@ function AuthSetupScreen() {
 
 function AuthPage() {
   const [mode, setMode] = useState<'login' | 'register'>('login')
-  const [email, setEmail] = useState('')
+  const [email, setEmail] = useState(() => getRememberedEmail())
   const [password, setPassword] = useState('')
   const [fullName, setFullName] = useState('')
+  const [rememberCredentials, setRememberCredentials] = useState(() => Boolean(getRememberedEmail()))
   const [message, setMessage] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
 
@@ -342,6 +356,12 @@ function AuthPage() {
       return
     }
 
+    if (rememberCredentials) {
+      window.localStorage.setItem(rememberedEmailStorageKey, email.trim())
+    } else {
+      window.localStorage.removeItem(rememberedEmailStorageKey)
+    }
+
     setMessage(mode === 'login' ? '登录成功，正在进入系统。' : '注册成功，正在进入系统。')
   }
 
@@ -374,7 +394,8 @@ function AuthPage() {
             <span>邮箱</span>
             <input
               type="email"
-              autoComplete="email"
+              name="email"
+              autoComplete="username"
               value={email}
               onChange={(event) => setEmail(event.target.value)}
               placeholder="name@company.com"
@@ -384,12 +405,26 @@ function AuthPage() {
             <span>密码</span>
             <input
               type="password"
+              name="password"
               autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
               value={password}
               onChange={(event) => setPassword(event.target.value)}
               placeholder="至少 6 位密码"
             />
           </label>
+          {mode === 'login' ? (
+            <label className="checkbox-line auth-checkbox-line">
+              <input
+                type="checkbox"
+                checked={rememberCredentials}
+                onChange={(event) => setRememberCredentials(event.target.checked)}
+              />
+              <span>记住账号，并允许浏览器保存密码</span>
+            </label>
+          ) : null}
+          {mode === 'login' ? (
+            <p className="auth-safe-note">系统只保存邮箱账号，密码由 Chrome 浏览器的密码管理器保存，不写入系统数据库。</p>
+          ) : null}
           {message ? <p className="warning-box">{message}</p> : null}
           <button className="primary-button" disabled={isSubmitting} type="submit">
             {isSubmitting ? '处理中...' : mode === 'login' ? '登录' : '注册'}
@@ -545,8 +580,229 @@ function DashboardPage({ currentProfile }: { currentProfile: UserProfile | null 
           )}
         </section>
       </div>
+
+      {isTeamView ? <SalesUserManagementPanel currentProfile={currentProfile} /> : null}
     </section>
   )
+}
+
+type UserProfileDraft = {
+  full_name: string
+  display_name: string
+  role: UserRole
+  department: string
+  is_active: boolean
+}
+
+function SalesUserManagementPanel({ currentProfile }: { currentProfile: UserProfile | null }) {
+  const [profiles, setProfiles] = useState<UserProfile[]>([])
+  const [drafts, setDrafts] = useState<Record<string, UserProfileDraft>>({})
+  const [message, setMessage] = useState('')
+  const [isLoading, setIsLoading] = useState(false)
+  const [savingProfileId, setSavingProfileId] = useState('')
+
+  async function loadProfiles() {
+    setIsLoading(true)
+    const result = await fetchUserProfiles()
+    setIsLoading(false)
+    setProfiles(result.profiles)
+    setDrafts(Object.fromEntries(result.profiles.map((profile) => [profile.id, buildUserProfileDraft(profile)])))
+    setMessage(result.error ?? '')
+  }
+
+  useEffect(() => {
+    if (!canManageTeam(currentProfile)) {
+      return
+    }
+    let mounted = true
+    void fetchUserProfiles().then((result) => {
+      if (!mounted) return
+      setProfiles(result.profiles)
+      setDrafts(Object.fromEntries(result.profiles.map((profile) => [profile.id, buildUserProfileDraft(profile)])))
+      setMessage(result.error ?? '')
+    })
+    return () => {
+      mounted = false
+    }
+  }, [currentProfile])
+
+  function updateDraft(profileId: string, patch: Partial<UserProfileDraft>) {
+    setDrafts((current) => ({
+      ...current,
+      [profileId]: {
+        ...current[profileId],
+        ...patch,
+      },
+    }))
+  }
+
+  async function handleSaveProfile(profile: UserProfile) {
+    const draft = drafts[profile.id]
+    if (!draft) return
+    setSavingProfileId(profile.id)
+    const result = await updateUserProfile(profile.id, {
+      full_name: draft.full_name.trim() || null,
+      display_name: draft.display_name.trim() || null,
+      role: draft.role,
+      department: draft.department.trim() || null,
+      is_active: draft.is_active,
+    })
+    setSavingProfileId('')
+    if (result.error) {
+      setMessage(result.error)
+      return
+    }
+    setMessage('业务员资料已保存。')
+    await loadProfiles()
+  }
+
+  async function handleToggleActive(profile: UserProfile) {
+    if (profile.user_id === currentProfile?.user_id && profile.is_active) {
+      setMessage('不能停用当前登录账号。')
+      return
+    }
+    const nextActive = !profile.is_active
+    setSavingProfileId(profile.id)
+    const result = await updateUserProfile(profile.id, { is_active: nextActive })
+    setSavingProfileId('')
+    if (result.error) {
+      setMessage(result.error)
+      return
+    }
+    setMessage(nextActive ? '业务员已启用。' : '业务员已停用。')
+    await loadProfiles()
+  }
+
+  async function handleDeleteProfile(profile: UserProfile) {
+    if (profile.user_id === currentProfile?.user_id) {
+      setMessage('不能删除当前登录账号资料。')
+      return
+    }
+    const confirmed = window.confirm(`确认删除 ${getProfileDisplayName(profile)} 的业务员资料？这不会删除 Supabase Auth 登录账号。`)
+    if (!confirmed) return
+    setSavingProfileId(profile.id)
+    const result = await deleteUserProfile(profile.id)
+    setSavingProfileId('')
+    if (result.error) {
+      setMessage(result.error)
+      return
+    }
+    setMessage('业务员资料已删除。')
+    await loadProfiles()
+  }
+
+  if (!canManageTeam(currentProfile)) {
+    return null
+  }
+
+  return (
+    <section className="panel sales-management-panel">
+      <div className="section-title">
+        <div>
+          <h2>业务员管理</h2>
+          <p>管理员可维护业务员角色、部门和启停状态。删除资料不会删除 Supabase Auth 登录账号。</p>
+        </div>
+        <button className="ghost-button" type="button" onClick={() => void loadProfiles()} disabled={isLoading}>
+          {isLoading ? '刷新中...' : '刷新列表'}
+        </button>
+      </div>
+
+      {message ? <p className="warning-box">{message}</p> : null}
+
+      <div className="table-wrap">
+        <table className="sales-management-table">
+          <thead>
+            <tr>
+              <th>姓名</th>
+              <th>显示名称</th>
+              <th>邮箱</th>
+              <th>角色</th>
+              <th>部门</th>
+              <th>状态</th>
+              <th>创建时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {profiles.length === 0 ? (
+              <tr>
+                <td colSpan={8}>暂无业务员资料</td>
+              </tr>
+            ) : profiles.map((profile) => {
+              const draft = drafts[profile.id] ?? buildUserProfileDraft(profile)
+              const isSelf = profile.user_id === currentProfile?.user_id
+              const isSaving = savingProfileId === profile.id
+              return (
+                <tr key={profile.id}>
+                  <td>
+                    <input
+                      value={draft.full_name}
+                      onChange={(event) => updateDraft(profile.id, { full_name: event.target.value })}
+                      placeholder="姓名"
+                    />
+                  </td>
+                  <td>
+                    <input
+                      value={draft.display_name}
+                      onChange={(event) => updateDraft(profile.id, { display_name: event.target.value })}
+                      placeholder="显示名称"
+                    />
+                  </td>
+                  <td>{profile.email || '-'}</td>
+                  <td>
+                    <select
+                      value={draft.role}
+                      onChange={(event) => updateDraft(profile.id, { role: event.target.value as UserRole })}
+                    >
+                      <option value="sales">业务员</option>
+                      <option value="manager">经理</option>
+                      <option value="admin">管理员</option>
+                    </select>
+                  </td>
+                  <td>
+                    <input
+                      value={draft.department}
+                      onChange={(event) => updateDraft(profile.id, { department: event.target.value })}
+                      placeholder="部门"
+                    />
+                  </td>
+                  <td>
+                    <span className={`lead-tag ${draft.is_active ? 'status-replied' : 'status-invalid'}`}>
+                      {draft.is_active ? '启用' : '停用'}
+                    </span>
+                  </td>
+                  <td>{formatDate(profile.created_at)}</td>
+                  <td>
+                    <div className="row-actions">
+                      <button className="table-action-button" type="button" disabled={isSaving} onClick={() => void handleSaveProfile(profile)}>
+                        保存
+                      </button>
+                      <button className="table-action-button" type="button" disabled={isSaving || isSelf} onClick={() => void handleToggleActive(profile)}>
+                        {profile.is_active ? '停用' : '启用'}
+                      </button>
+                      <button className="table-action-button danger-text-button" type="button" disabled={isSaving || isSelf} onClick={() => void handleDeleteProfile(profile)}>
+                        删除
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  )
+}
+
+function buildUserProfileDraft(profile: UserProfile): UserProfileDraft {
+  return {
+    full_name: profile.full_name ?? '',
+    display_name: profile.display_name ?? '',
+    role: profile.role,
+    department: profile.department ?? '',
+    is_active: profile.is_active,
+  }
 }
 
 function buildDashboardStats(
